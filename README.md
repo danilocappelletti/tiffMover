@@ -1,6 +1,6 @@
 # Professional TIFF Image Editor
 
-A comprehensive Python application for editing high-resolution TIFF images with professional measurement tools, precision controls, and advanced navigation.
+A comprehensive Python application for editing high-resolution TIFF images with professional measurement tools, precision controls, and advanced navigation. Made to manage big tiff files.
 
 ## ✨ Features
 
