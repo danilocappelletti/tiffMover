@@ -1,0 +1,19 @@
+# Set default line ending behavior
+* text=auto
+
+# Force LF for specific file types that should be consistent across platforms
+*.py text eol=lf
+*.md text eol=lf
+*.json text eol=lf
+*.txt text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf
+
+# Binary files
+*.tiff binary
+*.tif binary
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.ico binary
+*.exe binary

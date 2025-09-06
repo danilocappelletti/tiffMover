@@ -1,0 +1,16 @@
+{
+	"version": "2.0.0",
+	"tasks": [
+		{
+			"label": "Run Image Editor",
+			"type": "shell",
+			"command": "C:/Users/danil/Documents/PersonalWorks/mover/.venv/Scripts/python.exe",
+			"args": [
+				"image_editor.py"
+			],
+			"group": "build",
+			"isBackground": false,
+			"problemMatcher": []
+		}
+	]
+}
