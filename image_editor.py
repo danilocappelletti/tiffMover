@@ -1,11 +1,35 @@
 """
 High-Resolution TIFF Image Editor with Free Drawing Selection and Color Assignment
-Features:
-- Load high-resolution TIFF images
+
+🚫 NO SIZE LIMITS: All PIL/Pillow image size restrictions removed - load any size TIFF!
+
+NEW FEATURES:
+- 🎨 FREE-FORM DRAG & DROP ARRANGEMENT: Arrange multiple images freely on a blank canvas
+- 📁 MULTI-FILE MERGE: Load multiple TIFF files and merge them with different arrangements
+- 🖱️ INTERACTIVE PREVIEW: Real-time drag and drop positioning with visual feedback
+- 🔍 ZOOM IN DRAG & DROP: Mouse wheel zoom (10%-500%) in free-form canvas for precision work
+- 🎛️ FLEXIBLE CANVAS: Custom canvas sizes with no dimension limitations
+- 🎨 BACKGROUND COLORS: Choose custom background colors for merged images
+- 📐 PRECISE POSITIONING: Manual position and scale controls for each image
+- 🚫 UNLIMITED SIZE: Bypassed all PIL size limits - load massive TIFF files without restrictions
+
+CORE FEATURES:
+- Load single or multiple TIFF images of ANY SIZE (gigapixel images supported)
+- Multi-file merge with preview (horizontal, vertical, grid, or free-form arrangement)
+- Drag & drop interface for free-form image positioning
+- Image scaling and positioning controls
 - Free drawing selection tool
 - Color assignment to selected sections
 - Move and rearrange sections
 - Clip/cut selected sections
+- Precision movement with grid snapping and ruler tools
+- Export functionality for both single and merged images
+
+TECHNICAL NOTES:
+- PIL MAX_IMAGE_PIXELS set to None (removes ~89MP default limit)
+- Warnings for large images suppressed
+- Memory-efficient handling of gigapixel images
+- Progress feedback for large image operations
 """
 
 import tkinter as tk
@@ -15,10 +39,15 @@ from PIL import Image, ImageTk, ImageDraw
 import json
 import os
 
+# Remove PIL image size limits to handle very large TIFF files
+Image.MAX_IMAGE_PIXELS = None  # Remove the default ~89MP limit
+import warnings
+warnings.filterwarnings("ignore", ".*exceeds limit.*", module="PIL")
+
 class ImageEditor:
     def __init__(self, root):
         self.root = root
-        self.root.title("📸 Advanced TIFF Image Editor - Professional Edition")
+        self.root.title("📸 Advanced TIFF Image Editor - No Size Limits")
         self.root.geometry("1600x1000")
         self.root.configure(bg='#f0f0f0')
         
@@ -94,6 +123,36 @@ class ImageEditor:
         self.min_update_interval = 8  # Faster updates (125 FPS) for responsive movement
         self.movement_interpolation = False  # Disable interpolation for faster movement
         self.interpolation_steps = 1  # Reduced interpolation steps
+        
+        # Multi-file merge variables
+        self.loaded_files = []  # List of file paths for merging
+        self.loaded_images = []  # List of PIL Image objects
+        self.merge_preview_window = None  # Preview window for merge arrangement
+        self.merge_arrangement = "horizontal"  # horizontal, vertical, grid, freeform
+        self.merge_spacing = 10  # Pixels between images when merging
+        self.is_merged_image = False  # Track if current image is result of merge
+        
+        # Free-form arrangement variables
+        self.image_positions = []  # List of (x, y) positions for each image
+        self.image_scales = []  # List of scale factors for each image
+        self.dragging_image = None  # Index of image being dragged
+        self.potential_drag_image = None  # Image that might be dragged if mouse moves
+        self.drag_start_pos = None  # Starting position of drag
+        self.canvas_background_color = "white"  # Background color for free-form canvas
+        self.freeform_canvas_size = (5000, 4000)  # Much larger default canvas size for free-form arrangement
+        
+        # Performance optimization variables for drag-and-drop
+        self.preview_images = []  # Downscaled images for fast drag-and-drop visualization
+        self.preview_photos = []  # PhotoImage objects for preview images
+        self.preview_scale_factor = 0.15  # Scale factor for preview images (15% of original)
+        self.selected_image_index = None  # Currently selected image index
+        self.selection_border_width = 4  # Width of selection border
+        
+        # Freeform canvas zoom variables
+        self.freeform_zoom = 0.3  # Start zoomed out to see more of the large canvas
+        self.freeform_zoom_min = 0.05  # Minimum zoom level (zoom out more)
+        self.freeform_zoom_max = 5.0  # Maximum zoom level
+        self.freeform_canvas_original_size = (5000, 4000)  # Original canvas size before zoom
         
         self.setup_ui()
         
@@ -233,7 +292,7 @@ class ImageEditor:
         self.status_frame.pack_propagate(False)
         
         self.status_label = tk.Label(self.status_frame,
-                                    text="Ready - Load a TIFF image to begin",
+                                    text="Ready - Load any size TIFF image (no limits) • Multi-file merge with zoom & drag-drop available",
                                     font=('Arial', 9),
                                     bg='#333',
                                     fg='white',
@@ -272,6 +331,10 @@ class ImageEditor:
         # File operations
         tk.Button(button_frame, text="Load TIFF", command=self.load_image,
                  bg='#4CAF50', fg='white', font=('Arial', 9), 
+                 padx=10, pady=5).pack(side=tk.LEFT, padx=2)
+                 
+        tk.Button(button_frame, text="📁 Multi-File", command=self.load_multiple_files,
+                 bg='#9C27B0', fg='white', font=('Arial', 9), 
                  padx=10, pady=5).pack(side=tk.LEFT, padx=2)
                  
         tk.Button(button_frame, text="Save Project", command=self.save_project,
@@ -938,7 +1001,7 @@ class ImageEditor:
                 self.update_status("All sections deleted")
         
     def load_image(self):
-        """Load a TIFF image"""
+        """Load a TIFF image with no size restrictions"""
         file_path = filedialog.askopenfilename(
             title="Select TIFF Image",
             filetypes=[("TIFF files", "*.tiff *.tif"), ("All files", "*.*")]
@@ -946,16 +1009,26 @@ class ImageEditor:
         
         if file_path:
             try:
-                self.update_status("Loading image...")
+                self.update_status("Loading image (no size limits)...")
+                
+                # Temporarily disable PIL warnings and limits
+                original_max_pixels = Image.MAX_IMAGE_PIXELS
+                Image.MAX_IMAGE_PIXELS = None
                 
                 # Load with PIL for TIFF support
                 self.original_image = Image.open(file_path)
                 
+                # Get image info for user feedback
+                width, height = self.original_image.size
+                megapixels = (width * height) / 1_000_000
+                self.update_status(f"Loading large image: {width}×{height} ({megapixels:.1f}MP)...")
+                
                 # Extract DPI from image metadata
                 self._extract_and_set_dpi(file_path)
                 
-                # Convert to RGB if needed
+                # Convert to RGB if needed (this might take time for very large images)
                 if self.original_image.mode != 'RGB':
+                    self.update_status(f"Converting to RGB format...")
                     self.original_image = self.original_image.convert('RGB')
                 
                 # Create working copy
@@ -966,28 +1039,48 @@ class ImageEditor:
                 self.clipped_sections = []
                 self.update_sections_list()
                 
+                # Reset merge state
+                self.is_merged_image = False
+                
                 # Reset image controls
                 self.width_var.set("100")
                 self.height_var.set("100")
                 self.image_scale = 1.0
                 
-                # Update image info
+                # Update image info with large file details
                 width, height = self.original_image.size
                 file_size = os.path.getsize(file_path) / (1024 * 1024)  # MB
-                self.update_image_info(f"{os.path.basename(file_path)} • {width}×{height} • {file_size:.1f}MB")
+                megapixels = (width * height) / 1_000_000
+                
+                self.update_image_info(f"{os.path.basename(file_path)} • {width:,}×{height:,} • {megapixels:.1f}MP • {file_size:.1f}MB")
                 
                 # Update canvas info
                 if hasattr(self, 'canvas_info_label'):
-                    self.canvas_info_label.config(text=f"Image loaded: {width}×{height} pixels • Use mouse wheel to zoom, WASD/arrows to navigate")
+                    self.canvas_info_label.config(text=f"Large image loaded: {width:,}×{height:,} pixels ({megapixels:.1f}MP) • Use mouse wheel to zoom")
                 
-                # Display image
+                # Display image (might take time for very large images)
+                self.update_status(f"Rendering large image for display...")
                 self.root.after(100, self.fit_to_window)  # Delay to ensure canvas is ready
                 
-                self.update_status(f"Successfully loaded {os.path.basename(file_path)} • Use mouse wheel to zoom, WASD/arrow keys to navigate")
+                # Reset window title for single image
+                self.root.title("📸 Advanced TIFF Image Editor - No Size Limits")
+                
+                self.update_status(f"Successfully loaded large image: {width:,}×{height:,} ({megapixels:.1f}MP) • Use mouse wheel to zoom")
+                
+                # Restore original limit setting (though we set it to None anyway)
+                Image.MAX_IMAGE_PIXELS = original_max_pixels
                 
             except Exception as e:
+                # Restore original limit setting on error
+                Image.MAX_IMAGE_PIXELS = original_max_pixels
                 self.update_status("Failed to load image")
-                messagebox.showerror("Error", f"Failed to load image: {str(e)}")
+                error_msg = str(e)
+                # Provide more helpful error messages
+                if "exceeds limit" in error_msg.lower():
+                    error_msg = f"Image size limit error bypassed, but still failed: {error_msg}\n\nTry closing other applications to free up memory."
+                elif "memory" in error_msg.lower():
+                    error_msg = f"Memory error: {error_msg}\n\nThis image might be too large for available RAM."
+                messagebox.showerror("Error", f"Failed to load image: {error_msg}")
     
     def _extract_and_set_dpi(self, file_path):
         """Extract DPI from image metadata and update the UI"""
@@ -1983,26 +2076,71 @@ class ImageEditor:
             self.update_status(f"Image navigation attempted ({speed}) • Image may not be large enough to pan")
         
     def fit_to_window(self):
-        """Fit image to window"""
+        """Fit image to window with performance optimization for large images"""
         if self.original_image is None:
             return
             
         try:
             img_width, img_height = self.original_image.size
             
+            # Calculate megapixels for performance optimization
+            megapixels = (img_width * img_height) / 1_000_000
+            
             # Update canvas to get current size
             self.canvas.update_idletasks()
             canvas_width = self.canvas.winfo_width()
             canvas_height = self.canvas.winfo_height()
             
-            # Make sure canvas has reasonable dimensions
+            # Calculate fit-to-window scale
+            fit_scale = 1.0
             if canvas_width > 50 and canvas_height > 50:
                 scale_x = (canvas_width - 20) / img_width  # Leave some margin
                 scale_y = (canvas_height - 20) / img_height
-                self.image_scale = min(scale_x, scale_y, 1.0)
+                fit_scale = min(scale_x, scale_y, 1.0)
             else:
                 # Fallback scale if canvas size is not available
-                self.image_scale = 0.5
+                fit_scale = 0.5
+            
+            # Apply smart scaling that balances performance and visibility
+            performance_scale = 1.0
+            target_display_scale = 0.2  # Target 20% visibility as minimum
+            
+            if megapixels > 100:
+                # Very large images: aggressive performance scaling but ensure visibility
+                performance_scale = 0.3  # 30% for very large images
+                self.update_status(f"Performance mode: Using {int(performance_scale*100)}% preview for very large {megapixels:.1f}MP image")
+            elif megapixels > 50:
+                # Large images: moderate performance scaling
+                performance_scale = 0.5  # 50% for large images  
+                self.update_status(f"Performance mode: Using {int(performance_scale*100)}% preview for large {megapixels:.1f}MP image")
+            elif megapixels > 25:
+                # Medium-large images: light performance scaling
+                performance_scale = 0.7  # 70% for medium-large images
+                self.update_status(f"Performance mode: Using {int(performance_scale*100)}% preview for {megapixels:.1f}MP image")
+            
+            # Calculate combined scale
+            combined_scale = fit_scale * performance_scale
+            
+            # Ensure good visibility - prioritize usability over extreme performance
+            if combined_scale < target_display_scale:
+                # If the combined scale would make image too small, adjust the balance
+                # Keep some performance benefit but ensure usability
+                needed_fit_scale = target_display_scale / performance_scale
+                
+                if needed_fit_scale > 1.0:
+                    # If we need more than 100% fit scale, reduce performance scaling instead
+                    performance_scale = target_display_scale / fit_scale
+                    performance_scale = max(performance_scale, 0.2)  # Never go below 20%
+                    combined_scale = fit_scale * performance_scale
+                else:
+                    combined_scale = target_display_scale
+            
+            self.image_scale = combined_scale
+            
+            # Update canvas scroll region for larger images
+            display_width = int(img_width * self.image_scale)
+            display_height = int(img_height * self.image_scale)
+            self.canvas.configure(scrollregion=(0, 0, display_width, display_height))
                 
             self.display_image()
             
@@ -2850,11 +2988,1541 @@ class ImageEditor:
         
         if file_path:
             try:
+                # Verify we're exporting full resolution
+                export_width, export_height = self.working_image.size
+                original_width, original_height = self.original_image.size
+                export_mp = (export_width * export_height) / 1_000_000
+                
                 self.working_image.save(file_path)
-                messagebox.showinfo("Success", "Image exported successfully")
+                
+                # Confirm full quality export
+                if export_width == original_width and export_height == original_height:
+                    messagebox.showinfo("Success", 
+                        f"Full resolution image exported successfully!\n\n"
+                        f"Resolution: {export_width:,}×{export_height:,} ({export_mp:.1f}MP)\n"
+                        f"Location: {file_path}")
+                else:
+                    messagebox.showinfo("Success", 
+                        f"Image exported successfully!\n\n"
+                        f"Export resolution: {export_width:,}×{export_height:,} ({export_mp:.1f}MP)\n"
+                        f"Original resolution: {original_width:,}×{original_height:,}\n"
+                        f"Location: {file_path}")
                 
             except Exception as e:
                 messagebox.showerror("Error", f"Failed to export image: {str(e)}")
+    
+    def load_multiple_files(self):
+        """Load multiple TIFF files for merging"""
+        file_paths = filedialog.askopenfilenames(
+            title="Select Multiple TIFF Images to Merge",
+            filetypes=[("TIFF files", "*.tiff *.tif"), ("All files", "*.*")]
+        )
+        
+        if file_paths:
+            self.loaded_files = list(file_paths)
+            self.loaded_images = []
+            
+            try:
+                self.update_status("Loading images for merge...")
+                
+                # Load all images with better error handling and no size limits
+                loaded_count = 0
+                failed_files = []
+                
+                # Temporarily disable PIL limits for all images
+                original_max_pixels = Image.MAX_IMAGE_PIXELS
+                Image.MAX_IMAGE_PIXELS = None
+                
+                for i, file_path in enumerate(self.loaded_files):
+                    try:
+                        self.update_status(f"Loading image {i+1}/{len(self.loaded_files)}: {os.path.basename(file_path)}")
+                        
+                        img = Image.open(file_path)
+                        width, height = img.size
+                        megapixels = (width * height) / 1_000_000
+                        
+                        if megapixels > 100:  # Show info for very large images
+                            self.update_status(f"Loading large image {i+1}: {width:,}×{height:,} ({megapixels:.1f}MP)")
+                        
+                        if img.mode != 'RGB':
+                            img = img.convert('RGB')
+                        self.loaded_images.append(img)
+                        loaded_count += 1
+                    except Exception as file_error:
+                        error_msg = str(file_error)
+                        if "exceeds limit" in error_msg.lower():
+                            error_msg = "Size limit bypassed but still failed - possibly memory issue"
+                        failed_files.append(f"{os.path.basename(file_path)}: {error_msg}")
+                        continue
+                
+                # Restore original setting
+                Image.MAX_IMAGE_PIXELS = original_max_pixels
+                
+                if failed_files:
+                    error_msg = "Some files failed to load:\n" + "\n".join(failed_files[:5])
+                    if len(failed_files) > 5:
+                        error_msg += f"\n... and {len(failed_files) - 5} more"
+                    messagebox.showwarning("Loading Issues", error_msg)
+                
+                if loaded_count == 0:
+                    raise Exception("No images could be loaded")
+                
+                # Remove failed files from the list
+                if failed_files:
+                    successful_files = []
+                    for i, file_path in enumerate(self.loaded_files):
+                        if i < len(self.loaded_images):
+                            successful_files.append(file_path)
+                    self.loaded_files = successful_files
+                
+                self.update_status(f"Loaded {loaded_count} images. Opening merge preview...")
+                
+                # Initialize position and scale arrays
+                self.image_positions = []
+                self.image_scales = []
+                
+                # Open merge preview window
+                self.open_merge_preview()
+                
+            except Exception as e:
+                self.update_status("Failed to load images")
+                messagebox.showerror("Error", f"Failed to load images: {str(e)}")
+                self.loaded_files = []
+                self.loaded_images = []
+                self.image_positions = []
+                self.image_scales = []
+    
+    def open_merge_preview(self):
+        """Open preview window for arranging images before merge"""
+        if self.merge_preview_window:
+            self.merge_preview_window.destroy()
+        
+        self.merge_preview_window = tk.Toplevel(self.root)
+        self.merge_preview_window.title("🔄 Merge Images Preview")
+        self.merge_preview_window.geometry("900x700")
+        self.merge_preview_window.configure(bg='#f0f0f0')
+        
+        # Make window modal
+        self.merge_preview_window.transient(self.root)
+        self.merge_preview_window.grab_set()
+        
+        # Header
+        header_frame = tk.Frame(self.merge_preview_window, bg='#2563eb', height=60)
+        header_frame.pack(fill=tk.X)
+        header_frame.pack_propagate(False)
+        
+        title_label = tk.Label(header_frame, text="📁 Merge Multiple Images", 
+                              font=('Arial', 14, 'bold'), bg='#2563eb', fg='white')
+        title_label.pack(expand=True)
+        
+        # Main content
+        content_frame = tk.Frame(self.merge_preview_window, bg='#f0f0f0')
+        content_frame.pack(fill=tk.BOTH, expand=True, padx=20, pady=20)
+        
+        # Left panel - File list and settings
+        left_panel = tk.Frame(content_frame, bg='#f0f0f0', width=300)
+        left_panel.pack(side=tk.LEFT, fill=tk.Y, padx=(0, 20))
+        left_panel.pack_propagate(False)
+        
+        # Files section
+        files_section = tk.LabelFrame(left_panel, text="📄 Selected Files", 
+                                     font=('Arial', 10, 'bold'), bg='#f0f0f0', fg='#333',
+                                     padx=10, pady=10)
+        files_section.pack(fill=tk.X, pady=(0, 15))
+        
+        # File list
+        self.merge_files_listbox = tk.Listbox(files_section, height=6, font=('Arial', 9))
+        for i, file_path in enumerate(self.loaded_files):
+            filename = os.path.basename(file_path)
+            img_size = self.loaded_images[i].size
+            self.merge_files_listbox.insert(tk.END, f"{i+1}. {filename} ({img_size[0]}×{img_size[1]})")
+        self.merge_files_listbox.pack(fill=tk.X, pady=(0, 10))
+        
+        # File controls
+        file_controls_frame = tk.Frame(files_section, bg='#f0f0f0')
+        file_controls_frame.pack(fill=tk.X)
+        
+        tk.Button(file_controls_frame, text="➕ Add More", command=self.add_more_files,
+                 bg='#4CAF50', fg='white', font=('Arial', 8), padx=8, pady=2).pack(side=tk.LEFT, padx=(0, 5))
+        
+        tk.Button(file_controls_frame, text="🗑️ Remove", command=self.remove_selected_file,
+                 bg='#f44336', fg='white', font=('Arial', 8), padx=8, pady=2).pack(side=tk.LEFT, padx=(0, 5))
+        
+        tk.Button(file_controls_frame, text="🔄 Reorder", command=self.reorder_files,
+                 bg='#FF9800', fg='white', font=('Arial', 8), padx=8, pady=2).pack(side=tk.LEFT)
+        
+        # Merge settings section
+        settings_section = tk.LabelFrame(left_panel, text="⚙️ Merge Settings", 
+                                        font=('Arial', 10, 'bold'), bg='#f0f0f0', fg='#333',
+                                        padx=10, pady=10)
+        settings_section.pack(fill=tk.X, pady=(0, 15))
+        
+        # Arrangement options
+        tk.Label(settings_section, text="Arrangement:", font=('Arial', 9, 'bold'),
+                bg='#f0f0f0').pack(anchor=tk.W, pady=(0, 5))
+        
+        self.merge_arrangement_var = tk.StringVar(value="horizontal")
+        
+        arrange_frame = tk.Frame(settings_section, bg='#f0f0f0')
+        arrange_frame.pack(fill=tk.X, pady=(0, 10))
+        
+        tk.Radiobutton(arrange_frame, text="➡️ Horizontal", variable=self.merge_arrangement_var, 
+                      value="horizontal", command=self.on_arrangement_change,
+                      bg='#f0f0f0', font=('Arial', 9)).pack(anchor=tk.W)
+        
+        tk.Radiobutton(arrange_frame, text="⬇️ Vertical", variable=self.merge_arrangement_var, 
+                      value="vertical", command=self.on_arrangement_change,
+                      bg='#f0f0f0', font=('Arial', 9)).pack(anchor=tk.W)
+        
+        tk.Radiobutton(arrange_frame, text="🎛️ Grid (Auto)", variable=self.merge_arrangement_var, 
+                      value="grid", command=self.on_arrangement_change,
+                      bg='#f0f0f0', font=('Arial', 9)).pack(anchor=tk.W)
+        
+        tk.Radiobutton(arrange_frame, text="🎨 Free-form (Drag & Drop)", variable=self.merge_arrangement_var, 
+                      value="freeform", command=self.switch_to_freeform_mode,
+                      bg='#f0f0f0', font=('Arial', 9, 'bold'), fg='#2563eb').pack(anchor=tk.W)
+        
+        # Spacing control
+        spacing_frame = tk.Frame(settings_section, bg='#f0f0f0')
+        spacing_frame.pack(fill=tk.X, pady=(0, 10))
+        
+        tk.Label(spacing_frame, text="Spacing:", font=('Arial', 9, 'bold'),
+                bg='#f0f0f0').pack(side=tk.LEFT)
+        
+        self.merge_spacing_var = tk.StringVar(value="10")
+        spacing_spinbox = tk.Spinbox(spacing_frame, from_=0, to=100, increment=5,
+                                    textvariable=self.merge_spacing_var, width=8,
+                                    command=self.update_merge_preview, font=('Arial', 9))
+        spacing_spinbox.pack(side=tk.LEFT, padx=(5, 5))
+        spacing_spinbox.bind('<Return>', lambda e: self.update_merge_preview())
+        
+        tk.Label(spacing_frame, text="px", font=('Arial', 9),
+                bg='#f0f0f0').pack(side=tk.LEFT)
+        
+        # Canvas size controls (for free-form mode) - initially hidden
+        self.canvas_size_frame = tk.Frame(settings_section, bg='#f0f0f0')
+        
+        tk.Label(self.canvas_size_frame, text="Canvas Size (Free-form):", font=('Arial', 9, 'bold'),
+                bg='#f0f0f0').pack(anchor=tk.W, pady=(10, 5))
+        
+        canvas_size_controls = tk.Frame(self.canvas_size_frame, bg='#f0f0f0')
+        canvas_size_controls.pack(fill=tk.X, pady=(0, 5))
+        
+        tk.Label(canvas_size_controls, text="Width:", font=('Arial', 9),
+                bg='#f0f0f0').pack(side=tk.LEFT)
+        
+        self.canvas_width_var = tk.StringVar(value="2000")
+        width_spinbox = tk.Spinbox(canvas_size_controls, from_=500, to=10000, increment=100,
+                                  textvariable=self.canvas_width_var, width=8,
+                                  font=('Arial', 9))
+        width_spinbox.pack(side=tk.LEFT, padx=(5, 10))
+        
+        tk.Label(canvas_size_controls, text="Height:", font=('Arial', 9),
+                bg='#f0f0f0').pack(side=tk.LEFT)
+        
+        self.canvas_height_var = tk.StringVar(value="1500")
+        height_spinbox = tk.Spinbox(canvas_size_controls, from_=500, to=10000, increment=100,
+                                   textvariable=self.canvas_height_var, width=8,
+                                   font=('Arial', 9))
+        height_spinbox.pack(side=tk.LEFT, padx=(5, 5))
+        
+        tk.Label(canvas_size_controls, text="px", font=('Arial', 9),
+                bg='#f0f0f0').pack(side=tk.LEFT)
+        
+        # Right panel - Preview
+        preview_panel = tk.Frame(content_frame, bg='white', relief='solid', bd=1)
+        preview_panel.pack(side=tk.RIGHT, fill=tk.BOTH, expand=True)
+        
+        # Preview header
+        preview_header = tk.Frame(preview_panel, bg='#e0e0e0', height=40)
+        preview_header.pack(fill=tk.X)
+        preview_header.pack_propagate(False)
+        
+        tk.Label(preview_header, text="👁️ Merge Preview", font=('Arial', 10, 'bold'),
+                bg='#e0e0e0', fg='#333').pack(expand=True)
+        
+        # Preview canvas
+        self.merge_preview_canvas = tk.Canvas(preview_panel, bg='white')
+        
+        # Scrollbars for preview
+        v_scroll = tk.Scrollbar(preview_panel, orient=tk.VERTICAL, command=self.merge_preview_canvas.yview)
+        h_scroll = tk.Scrollbar(preview_panel, orient=tk.HORIZONTAL, command=self.merge_preview_canvas.xview)
+        
+        self.merge_preview_canvas.configure(yscrollcommand=v_scroll.set, xscrollcommand=h_scroll.set)
+        
+        v_scroll.pack(side=tk.RIGHT, fill=tk.Y)
+        h_scroll.pack(side=tk.BOTTOM, fill=tk.X)
+        self.merge_preview_canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        
+        # Summary section
+        summary_section = tk.LabelFrame(left_panel, text="📊 Merge Summary", 
+                                       font=('Arial', 10, 'bold'), bg='#f0f0f0', fg='#333',
+                                       padx=10, pady=10)
+        summary_section.pack(fill=tk.X, pady=(0, 15))
+        
+        self.merge_summary_label = tk.Label(summary_section, text="", 
+                                           font=('Arial', 9), bg='#f0f0f0', fg='#666',
+                                           justify=tk.LEFT, anchor=tk.W)
+        self.merge_summary_label.pack(fill=tk.X)
+        
+        # Bottom buttons
+        buttons_frame = tk.Frame(self.merge_preview_window, bg='#f0f0f0')
+        buttons_frame.pack(fill=tk.X, padx=20, pady=(0, 20))
+        
+        tk.Button(buttons_frame, text="❌ Cancel", command=self.cancel_merge,
+                 bg='#6c757d', fg='white', font=('Arial', 10, 'bold'),
+                 padx=20, pady=8).pack(side=tk.LEFT)
+        
+        tk.Button(buttons_frame, text="🔄 Update Preview", command=self.update_merge_preview,
+                 bg='#17a2b8', fg='white', font=('Arial', 10, 'bold'),
+                 padx=20, pady=8).pack(side=tk.LEFT, padx=(10, 0))
+        
+        tk.Button(buttons_frame, text="✅ Confirm Merge", command=self.confirm_merge,
+                 bg='#28a745', fg='white', font=('Arial', 10, 'bold'),
+                 padx=20, pady=8).pack(side=tk.RIGHT)
+        
+        # Initial preview
+        self.update_merge_preview()
+    
+    def add_more_files(self):
+        """Add more files to the merge list"""
+        file_paths = filedialog.askopenfilenames(
+            title="Select Additional TIFF Images",
+            filetypes=[("TIFF files", "*.tiff *.tif"), ("All files", "*.*")]
+        )
+        
+        if file_paths:
+            try:
+                for file_path in file_paths:
+                    if file_path not in self.loaded_files:
+                        img = Image.open(file_path)
+                        if img.mode != 'RGB':
+                            img = img.convert('RGB')
+                        
+                        self.loaded_files.append(file_path)
+                        self.loaded_images.append(img)
+                
+                # Update file list
+                self.merge_files_listbox.delete(0, tk.END)
+                for i, file_path in enumerate(self.loaded_files):
+                    filename = os.path.basename(file_path)
+                    img_size = self.loaded_images[i].size
+                    self.merge_files_listbox.insert(tk.END, f"{i+1}. {filename} ({img_size[0]}×{img_size[1]})")
+                
+                self.update_merge_preview()
+                
+            except Exception as e:
+                messagebox.showerror("Error", f"Failed to load additional images: {str(e)}")
+    
+    def remove_selected_file(self):
+        """Remove selected file from merge list"""
+        selection = self.merge_files_listbox.curselection()
+        if selection and len(self.loaded_files) > 1:
+            idx = selection[0]
+            
+            # Remove from lists
+            self.loaded_files.pop(idx)
+            self.loaded_images.pop(idx)
+            
+            # Update file list
+            self.merge_files_listbox.delete(0, tk.END)
+            for i, file_path in enumerate(self.loaded_files):
+                filename = os.path.basename(file_path)
+                img_size = self.loaded_images[i].size
+                self.merge_files_listbox.insert(tk.END, f"{i+1}. {filename} ({img_size[0]}×{img_size[1]})")
+            
+            self.update_merge_preview()
+        elif len(self.loaded_files) <= 1:
+            messagebox.showwarning("Warning", "Cannot remove - at least one image is required")
+    
+    def reorder_files(self):
+        """Simple reorder by moving selected item up or down"""
+        selection = self.merge_files_listbox.curselection()
+        if not selection:
+            messagebox.showinfo("Info", "Select a file to reorder")
+            return
+        
+        idx = selection[0]
+        
+        # Ask user whether to move up or down
+        choice = messagebox.askyesnocancel("Reorder", 
+                                          f"Move '{os.path.basename(self.loaded_files[idx])}' up (Yes) or down (No)?")
+        
+        if choice is True and idx > 0:  # Move up
+            # Swap with previous item
+            self.loaded_files[idx], self.loaded_files[idx-1] = self.loaded_files[idx-1], self.loaded_files[idx]
+            self.loaded_images[idx], self.loaded_images[idx-1] = self.loaded_images[idx-1], self.loaded_images[idx]
+            new_selection = idx - 1
+        elif choice is False and idx < len(self.loaded_files) - 1:  # Move down
+            # Swap with next item
+            self.loaded_files[idx], self.loaded_files[idx+1] = self.loaded_files[idx+1], self.loaded_files[idx]
+            self.loaded_images[idx], self.loaded_images[idx+1] = self.loaded_images[idx+1], self.loaded_images[idx]
+            new_selection = idx + 1
+        else:
+            return  # No change or cancelled
+        
+        # Update file list
+        self.merge_files_listbox.delete(0, tk.END)
+        for i, file_path in enumerate(self.loaded_files):
+            filename = os.path.basename(file_path)
+            img_size = self.loaded_images[i].size
+            self.merge_files_listbox.insert(tk.END, f"{i+1}. {filename} ({img_size[0]}×{img_size[1]})")
+        
+        # Restore selection
+        self.merge_files_listbox.selection_set(new_selection)
+        
+        self.update_merge_preview()
+    
+    def update_merge_preview(self):
+        """Update the merge preview based on current settings"""
+        if not self.loaded_images:
+            return
+        
+        try:
+            # Get current settings
+            arrangement = self.merge_arrangement_var.get()
+            
+            # For freeform, we handle it differently
+            if arrangement == "freeform":
+                return  # Freeform uses its own preview system
+            
+            spacing = int(self.merge_spacing_var.get())
+            
+            # Create merged image preview
+            merged_img = self.create_merged_image(arrangement, spacing, preview=True)
+            
+            if merged_img:
+                # Scale down for preview (max 500px in either dimension)
+                max_preview_size = 500
+                img_width, img_height = merged_img.size
+                
+                if img_width > max_preview_size or img_height > max_preview_size:
+                    scale_factor = min(max_preview_size / img_width, max_preview_size / img_height)
+                    new_width = int(img_width * scale_factor)
+                    new_height = int(img_height * scale_factor)
+                    preview_img = merged_img.resize((new_width, new_height), Image.Resampling.LANCZOS)
+                else:
+                    preview_img = merged_img
+                
+                # Convert to PhotoImage
+                self.merge_preview_photo = ImageTk.PhotoImage(preview_img)
+                
+                # Clear canvas and display
+                self.merge_preview_canvas.delete("all")
+                self.merge_preview_canvas.create_image(0, 0, anchor=tk.NW, image=self.merge_preview_photo)
+                
+                # Update scroll region
+                self.merge_preview_canvas.configure(scrollregion=self.merge_preview_canvas.bbox("all"))
+                
+                # Show final dimensions info
+                if hasattr(self, 'merge_preview_window'):
+                    self.merge_preview_window.title(f"🔄 Merge Preview - Final Size: {img_width}×{img_height}px")
+                
+                # Update summary
+                if hasattr(self, 'merge_summary_label'):
+                    total_pixels = img_width * img_height
+                    megapixels = total_pixels / 1_000_000
+                    file_count = len(self.loaded_images)
+                    
+                    summary_text = (f"Files: {file_count}\n"
+                                   f"Final Size: {img_width:,} × {img_height:,} px\n"
+                                   f"Total Pixels: {megapixels:.1f} MP\n"
+                                   f"Arrangement: {arrangement.title()}\n"
+                                   f"Spacing: {spacing} px")
+                    
+                    self.merge_summary_label.config(text=summary_text)
+        
+        except Exception as e:
+            print(f"Preview error: {e}")
+            if hasattr(self, 'merge_summary_label'):
+                self.merge_summary_label.config(text="Error generating preview")
+    
+    def create_merged_image(self, arrangement, spacing, preview=False):
+        """Create merged image based on arrangement and spacing"""
+        if not self.loaded_images:
+            return None
+        
+        images = self.loaded_images
+        
+        if arrangement == "horizontal":
+            # Calculate total width and max height (no size limits)
+            total_width = sum(img.width for img in images) + spacing * (len(images) - 1)
+            max_height = max(img.height for img in images)
+            
+            # Create new image
+            merged = Image.new('RGB', (total_width, max_height), 'white')
+            
+            # Paste images side by side
+            x_offset = 0
+            for img in images:
+                # Center vertically
+                y_offset = (max_height - img.height) // 2
+                merged.paste(img, (x_offset, y_offset))
+                x_offset += img.width + spacing
+        
+        elif arrangement == "vertical":
+            # Calculate max width and total height (no size limits)
+            max_width = max(img.width for img in images)
+            total_height = sum(img.height for img in images) + spacing * (len(images) - 1)
+            
+            # Create new image
+            merged = Image.new('RGB', (max_width, total_height), 'white')
+            
+            # Paste images vertically
+            y_offset = 0
+            for img in images:
+                # Center horizontally
+                x_offset = (max_width - img.width) // 2
+                merged.paste(img, (x_offset, y_offset))
+                y_offset += img.height + spacing
+        
+        elif arrangement == "grid":
+            # Calculate grid dimensions (try to make it as square as possible)
+            num_images = len(images)
+            cols = int(num_images ** 0.5)
+            rows = (num_images + cols - 1) // cols  # Ceiling division
+            
+            # Calculate cell size (max width/height among all images)
+            max_width = max(img.width for img in images)
+            max_height = max(img.height for img in images)
+            
+            # Calculate total dimensions (no size limits)
+            total_width = max_width * cols + spacing * (cols - 1)
+            total_height = max_height * rows + spacing * (rows - 1)
+            
+            # Create new image
+            merged = Image.new('RGB', (total_width, total_height), 'white')
+            
+            # Paste images in grid
+            for i, img in enumerate(images):
+                row = i // cols
+                col = i % cols
+                
+                x_offset = col * (max_width + spacing) + (max_width - img.width) // 2
+                y_offset = row * (max_height + spacing) + (max_height - img.height) // 2
+                
+                merged.paste(img, (x_offset, y_offset))
+        
+        elif arrangement == "freeform":
+            # Calculate dynamic canvas size based on image positions and sizes
+            min_x, min_y = 0, 0
+            max_x, max_y = 0, 0
+            
+            # First pass: calculate required canvas dimensions
+            positioned_images = []
+            for i, img in enumerate(images):
+                if i < len(self.image_positions):
+                    x, y = self.image_positions[i]
+                    
+                    # Scale positions from preview coordinate system to full resolution
+                    # The preview images are 15% scale, so positions need to be scaled up
+                    # The relationship is: full_position = preview_position / preview_scale_factor
+                    position_scale_factor = 1.0 / self.preview_scale_factor  # 1/0.15 ≈ 6.67
+                    x = x * position_scale_factor
+                    y = y * position_scale_factor
+                    
+                    # Apply scaling if specified
+                    current_img = img
+                    if i < len(self.image_scales) and self.image_scales[i] != 1.0:
+                        scale = self.image_scales[i]
+                        new_width = int(img.width * scale)
+                        new_height = int(img.height * scale)
+                        current_img = img.resize((new_width, new_height), Image.Resampling.LANCZOS)
+                    
+                    # Ensure positions are non-negative
+                    x, y = max(0, int(x)), max(0, int(y))
+                    
+                    # Calculate bounds needed for this image
+                    right_edge = x + current_img.width
+                    bottom_edge = y + current_img.height
+                    
+                    max_x = max(max_x, right_edge)
+                    max_y = max(max_y, bottom_edge)
+                    
+                    positioned_images.append((current_img, x, y))
+                    print(f"Image {i}: preview pos ({self.image_positions[i][0]:.1f}, {self.image_positions[i][1]:.1f}) -> scaled pos ({x}, {y})")
+                    print(f"  Size: {current_img.width}x{current_img.height}, edges: ({right_edge}, {bottom_edge})")
+                else:
+                    # Default positioning for images without specified positions
+                    positioned_images.append((img, i * 50, i * 50))
+                    max_x = max(max_x, (i * 50) + img.width)
+                    max_y = max(max_y, (i * 50) + img.height)
+            
+            # Add some padding to the canvas
+            padding = 100
+            canvas_width = max_x + padding
+            canvas_height = max_y + padding
+            
+            print(f"Dynamic canvas size: {canvas_width}x{canvas_height} (required: {max_x}x{max_y})")
+            
+            # Create dynamic canvas
+            merged = Image.new('RGB', (canvas_width, canvas_height), self.canvas_background_color)
+            
+            # Second pass: place all images
+            for img, x, y in positioned_images:
+                merged.paste(img, (int(x), int(y)))
+        
+        return merged
+    
+    def confirm_merge(self):
+        """Confirm and perform the merge operation"""
+        try:
+            # Get settings
+            arrangement = self.merge_arrangement_var.get()
+            spacing = int(self.merge_spacing_var.get()) if arrangement != "freeform" else 0
+            
+            # Create the final merged image
+            self.update_status("Creating merged image...")
+            merged_image = self.create_merged_image(arrangement, spacing, preview=False)
+            
+            if merged_image:
+                # Set as the current image
+                self.original_image = merged_image
+                self.working_image = merged_image.copy()
+                self.is_merged_image = True
+                
+                # Clear existing selections
+                self.current_selections = []
+                self.clipped_sections = []
+                self.update_sections_list()
+                
+                # Reset image controls
+                self.width_var.set("100")
+                self.height_var.set("100")
+                self.image_scale = 1.0
+                
+                # Update image info
+                width, height = merged_image.size
+                file_count = len(self.loaded_files)
+                self.update_image_info(f"Merged Image • {width}×{height} • {file_count} files")
+                
+                # Close preview window
+                self.merge_preview_window.destroy()
+                self.merge_preview_window = None
+                
+                # Ask if user wants to save the merged image
+                save_choice = messagebox.askyesno("Save Merged Image?", 
+                                                f"Would you like to save the merged image ({file_count} files) before editing?\n\n"
+                                                f"Final size: {width:,} × {height:,} pixels\n"
+                                                f"You can also export it later from the Export button.")
+                
+                if save_choice:
+                    self.export_merged_image(merged_image, file_count)
+                
+                # Display the merged image
+                self.root.after(100, self.fit_to_window)
+                
+                # Update window title to show merged status
+                self.root.title(f"📸 Advanced TIFF Image Editor - Merged Image ({file_count} files)")
+                
+                self.update_status(f"Successfully merged {file_count} images • Use mouse wheel to zoom • Ready for editing")
+                
+                # Clean up
+                self.loaded_files = []
+                self.loaded_images = []
+                
+            else:
+                messagebox.showerror("Error", "Failed to create merged image")
+        
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to merge images: {str(e)}")
+            self.update_status("Failed to merge images")
+    
+    def on_arrangement_change(self):
+        """Handle arrangement mode change"""
+        # Hide canvas size controls for non-freeform modes
+        if hasattr(self, 'canvas_size_frame'):
+            self.canvas_size_frame.pack_forget()
+        
+        # Update preview for regular arrangements
+        self.update_merge_preview()
+    
+    def switch_to_freeform_mode(self):
+        """Switch to free-form arrangement mode with drag and drop"""
+        # Initialize positions if not already set
+        if len(self.image_positions) != len(self.loaded_images):
+            self.image_positions = []
+            self.image_scales = []
+            
+            # Default positions: spread images across the canvas
+            canvas_width = int(self.canvas_width_var.get()) if hasattr(self, 'canvas_width_var') else 2000
+            canvas_height = int(self.canvas_height_var.get()) if hasattr(self, 'canvas_height_var') else 1500
+            
+            for i, img in enumerate(self.loaded_images):
+                # Spread images in a grid pattern initially
+                cols = int(len(self.loaded_images) ** 0.5) + 1
+                row = i // cols
+                col = i % cols
+                
+                x = col * (canvas_width // cols)
+                y = row * (canvas_height // cols)
+                
+                # Ensure image fits within canvas
+                if x + img.width > canvas_width:
+                    x = max(0, canvas_width - img.width)
+                if y + img.height > canvas_height:
+                    y = max(0, canvas_height - img.height)
+                
+                self.image_positions.append((x, y))
+                self.image_scales.append(1.0)
+        
+        # Show canvas size controls
+        if hasattr(self, 'canvas_size_frame'):
+            self.canvas_size_frame.pack(fill=tk.X, pady=(0, 10))
+        
+        # Switch to freeform preview mode
+        self.open_freeform_editor()
+    
+    def create_preview_images(self):
+        """Create downscaled preview images for fast drag-and-drop performance"""
+        self.preview_images = []
+        self.preview_photos = []
+        
+        for i, img in enumerate(self.loaded_images):
+            try:
+                # Calculate preview size
+                original_width, original_height = img.size
+                preview_width = int(original_width * self.preview_scale_factor)
+                preview_height = int(original_height * self.preview_scale_factor)
+                
+                # Ensure minimum size for visibility
+                preview_width = max(preview_width, 50)
+                preview_height = max(preview_height, 50)
+                
+                # Create high-quality thumbnail
+                preview_img = img.copy()
+                preview_img.thumbnail((preview_width, preview_height), Image.Resampling.LANCZOS)
+                
+                self.preview_images.append(preview_img)
+                
+                # Update status
+                self.update_status(f"Creating preview {i+1}/{len(self.loaded_images)}...")
+                self.root.update_idletasks()
+                
+            except Exception as e:
+                print(f"Error creating preview for image {i}: {e}")
+                # Create a placeholder if preview fails
+                placeholder = Image.new('RGB', (100, 100), color='lightgray')
+                self.preview_images.append(placeholder)
+        
+        self.update_status("Preview images created - ready for fast drag & drop!")
+
+    def open_freeform_editor(self):
+        """Open the free-form drag and drop editor"""
+        # Create preview images for performance
+        self.update_status("Creating optimized preview images for fast drag & drop...")
+        self.create_preview_images()
+        
+        # Close current preview window if open
+        if self.merge_preview_window:
+            self.merge_preview_window.destroy()
+        
+        self.merge_preview_window = tk.Toplevel(self.root)
+        self.merge_preview_window.title("🎨 Free-form Image Arranger - High Performance Mode")
+        self.merge_preview_window.geometry("1400x900")  # Larger window
+        self.merge_preview_window.configure(bg='#f0f0f0')
+        
+        # Make window modal
+        self.merge_preview_window.transient(self.root)
+        self.merge_preview_window.grab_set()
+        
+        # Header
+        header_frame = tk.Frame(self.merge_preview_window, bg='#2563eb', height=60)
+        header_frame.pack(fill=tk.X)
+        header_frame.pack_propagate(False)
+        
+        title_label = tk.Label(header_frame, text="🎨 Drag & Drop Image Arranger", 
+                              font=('Arial', 14, 'bold'), bg='#2563eb', fg='white')
+        title_label.pack(expand=True)
+        
+        # Main content
+        content_frame = tk.Frame(self.merge_preview_window, bg='#f0f0f0')
+        content_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+        
+        # Left panel - Controls
+        left_panel = tk.Frame(content_frame, bg='#f0f0f0', width=250)
+        left_panel.pack(side=tk.LEFT, fill=tk.Y, padx=(0, 10))
+        left_panel.pack_propagate(False)
+        
+        # Canvas settings
+        canvas_settings = tk.LabelFrame(left_panel, text="🖼️ Canvas Settings", 
+                                       font=('Arial', 10, 'bold'), bg='#f0f0f0', fg='#333',
+                                       padx=10, pady=10)
+        canvas_settings.pack(fill=tk.X, pady=(0, 10))
+        
+        # Canvas size
+        size_frame = tk.Frame(canvas_settings, bg='#f0f0f0')
+        size_frame.pack(fill=tk.X, pady=(0, 10))
+        
+        tk.Label(size_frame, text="Size:", font=('Arial', 9, 'bold'),
+                bg='#f0f0f0').pack(anchor=tk.W)
+        
+        size_controls = tk.Frame(size_frame, bg='#f0f0f0')
+        size_controls.pack(fill=tk.X, pady=(5, 0))
+        
+        tk.Label(size_controls, text="W:", bg='#f0f0f0').pack(side=tk.LEFT)
+        self.freeform_width_var = tk.StringVar(value="5000")  # Larger default canvas
+        width_entry = tk.Entry(size_controls, textvariable=self.freeform_width_var, width=6)
+        width_entry.pack(side=tk.LEFT, padx=(2, 5))
+        
+        tk.Label(size_controls, text="H:", bg='#f0f0f0').pack(side=tk.LEFT)
+        self.freeform_height_var = tk.StringVar(value="4000")  # Larger default canvas
+        height_entry = tk.Entry(size_controls, textvariable=self.freeform_height_var, width=6)
+        height_entry.pack(side=tk.LEFT, padx=(2, 5))
+        
+        tk.Button(size_controls, text="Apply", command=self.update_freeform_canvas,
+                 bg='#4CAF50', fg='white', font=('Arial', 8), padx=5).pack(side=tk.LEFT, padx=(5, 0))
+        
+        # Background color
+        bg_frame = tk.Frame(canvas_settings, bg='#f0f0f0')
+        bg_frame.pack(fill=tk.X, pady=(0, 5))
+        
+        tk.Label(bg_frame, text="Background:", font=('Arial', 9, 'bold'),
+                bg='#f0f0f0').pack(anchor=tk.W)
+        
+        self.bg_color_button = tk.Button(bg_frame, text="⬜ White", 
+                                        command=self.choose_background_color,
+                                        bg='white', font=('Arial', 8), padx=10)
+        self.bg_color_button.pack(fill=tk.X, pady=(5, 0))
+        
+        # Zoom controls
+        zoom_frame = tk.Frame(canvas_settings, bg='#f0f0f0')
+        zoom_frame.pack(fill=tk.X, pady=(10, 5))
+        
+        tk.Label(zoom_frame, text="Zoom:", font=('Arial', 9, 'bold'),
+                bg='#f0f0f0').pack(anchor=tk.W)
+        
+        zoom_controls = tk.Frame(zoom_frame, bg='#f0f0f0')
+        zoom_controls.pack(fill=tk.X, pady=(5, 0))
+        
+        tk.Button(zoom_controls, text="➖", command=self.zoom_out_freeform,
+                 bg='#6c757d', fg='white', font=('Arial', 8), width=3).pack(side=tk.LEFT)
+        
+        self.zoom_info_label = tk.Label(zoom_controls, text="Zoom: 100%", 
+                                       font=('Arial', 9), bg='#e0e0e0', fg='#333', 
+                                       width=10, relief='sunken')
+        self.zoom_info_label.pack(side=tk.LEFT, padx=(5, 5))
+        
+        tk.Button(zoom_controls, text="➕", command=self.zoom_in_freeform,
+                 bg='#6c757d', fg='white', font=('Arial', 8), width=3).pack(side=tk.LEFT)
+        
+        tk.Button(zoom_controls, text="🔄", command=self.reset_zoom_freeform,
+                 bg='#17a2b8', fg='white', font=('Arial', 8), width=3).pack(side=tk.LEFT, padx=(5, 0))
+        
+        # Zoom instruction
+        tk.Label(zoom_frame, text="💡 Mouse wheel or +/- keys to zoom, 0 to reset", 
+                font=('Arial', 8), bg='#f0f0f0', fg='#666').pack(pady=(5, 0))
+        
+        # Performance status section
+        perf_section = tk.LabelFrame(left_panel, text="⚡ Performance Mode", 
+                                    font=('Arial', 10, 'bold'), bg='#f0f0f0', fg='#28a745',
+                                    padx=8, pady=8, relief='groove', bd=2)
+        perf_section.pack(fill=tk.X, pady=(0, 10))
+        
+        # Performance info
+        self.perf_info_label = tk.Label(perf_section, 
+                                       text="Fast preview mode active",
+                                       font=('Arial', 9, 'bold'), bg='#f0f0f0', fg='#28a745')
+        self.perf_info_label.pack()
+        
+        performance_details = tk.Frame(perf_section, bg='#f0f0f0')
+        performance_details.pack(fill=tk.X, pady=(5, 0))
+        
+        # Show scale factor and other optimizations
+        scale_info = f"• Preview scale: {int(self.preview_scale_factor * 100)}% of original size"
+        tk.Label(performance_details, text=scale_info,
+                font=('Arial', 8), bg='#f0f0f0', fg='#666').pack(anchor=tk.W)
+        
+        tk.Label(performance_details, text="• Large TIFF files optimized for smooth dragging",
+                font=('Arial', 8), bg='#f0f0f0', fg='#666').pack(anchor=tk.W)
+        
+        tk.Label(performance_details, text="• Full resolution preserved for final export",
+                font=('Arial', 8), bg='#f0f0f0', fg='#666').pack(anchor=tk.W)
+        
+        # Image list and controls
+        images_section = tk.LabelFrame(left_panel, text="📄 Images", 
+                                      font=('Arial', 10, 'bold'), bg='#f0f0f0', fg='#333',
+                                      padx=10, pady=10)
+        images_section.pack(fill=tk.BOTH, expand=True, pady=(0, 10))
+        
+        # Image listbox
+        self.freeform_images_listbox = tk.Listbox(images_section, height=8, font=('Arial', 9))
+        self.freeform_images_listbox.pack(fill=tk.X, pady=(0, 10))
+        self.freeform_images_listbox.bind('<<ListboxSelect>>', self.on_freeform_image_select)
+        
+        # Populate image list
+        for i, file_path in enumerate(self.loaded_files):
+            filename = os.path.basename(file_path)
+            self.freeform_images_listbox.insert(tk.END, f"{i+1}. {filename}")
+        
+        # Image controls
+        img_controls = tk.Frame(images_section, bg='#f0f0f0')
+        img_controls.pack(fill=tk.X)
+        
+        tk.Label(img_controls, text="Selected Image:", font=('Arial', 9, 'bold'),
+                bg='#f0f0f0').pack(anchor=tk.W)
+        
+        # Position controls
+        pos_frame = tk.Frame(img_controls, bg='#f0f0f0')
+        pos_frame.pack(fill=tk.X, pady=(5, 5))
+        
+        tk.Label(pos_frame, text="X:", bg='#f0f0f0').pack(side=tk.LEFT)
+        self.img_x_var = tk.StringVar(value="0")
+        x_entry = tk.Entry(pos_frame, textvariable=self.img_x_var, width=6)
+        x_entry.pack(side=tk.LEFT, padx=(2, 5))
+        x_entry.bind('<Return>', self.update_selected_image_position)
+        
+        tk.Label(pos_frame, text="Y:", bg='#f0f0f0').pack(side=tk.LEFT)
+        self.img_y_var = tk.StringVar(value="0")
+        y_entry = tk.Entry(pos_frame, textvariable=self.img_y_var, width=6)
+        y_entry.pack(side=tk.LEFT, padx=(2, 5))
+        y_entry.bind('<Return>', self.update_selected_image_position)
+        
+        # Scale controls
+        scale_frame = tk.Frame(img_controls, bg='#f0f0f0')
+        scale_frame.pack(fill=tk.X, pady=(0, 5))
+        
+        tk.Label(scale_frame, text="Scale:", bg='#f0f0f0').pack(side=tk.LEFT)
+        self.img_scale_var = tk.StringVar(value="1.0")
+        scale_entry = tk.Entry(scale_frame, textvariable=self.img_scale_var, width=6)
+        scale_entry.pack(side=tk.LEFT, padx=(2, 5))
+        scale_entry.bind('<Return>', self.update_selected_image_scale)
+        
+        tk.Button(scale_frame, text="Reset", command=self.reset_selected_image_scale,
+                 bg='#6c757d', fg='white', font=('Arial', 8), padx=5).pack(side=tk.LEFT, padx=(5, 0))
+        
+        # Right panel - Canvas
+        canvas_panel = tk.Frame(content_frame, bg='white', relief='solid', bd=1)
+        canvas_panel.pack(side=tk.RIGHT, fill=tk.BOTH, expand=True)
+        
+        # Canvas with scrollbars
+        self.freeform_canvas = tk.Canvas(canvas_panel, bg='white')
+        
+        v_scroll = tk.Scrollbar(canvas_panel, orient=tk.VERTICAL, command=self.freeform_canvas.yview)
+        h_scroll = tk.Scrollbar(canvas_panel, orient=tk.HORIZONTAL, command=self.freeform_canvas.xview)
+        
+        self.freeform_canvas.configure(yscrollcommand=v_scroll.set, xscrollcommand=h_scroll.set)
+        
+        v_scroll.pack(side=tk.RIGHT, fill=tk.Y)
+        h_scroll.pack(side=tk.BOTTOM, fill=tk.X)
+        self.freeform_canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        
+        # Bind drag and drop events
+        self.freeform_canvas.bind("<Button-1>", self.on_freeform_canvas_click)
+        self.freeform_canvas.bind("<B1-Motion>", self.on_freeform_canvas_drag)
+        self.freeform_canvas.bind("<ButtonRelease-1>", self.on_freeform_canvas_release)
+        self.freeform_canvas.bind("<Motion>", self.on_freeform_canvas_motion)
+        
+        # Bind mouse wheel zoom events
+        self.freeform_canvas.bind("<MouseWheel>", self.on_freeform_canvas_zoom)  # Windows
+        self.freeform_canvas.bind("<Button-4>", self.on_freeform_canvas_zoom)    # Linux scroll up
+        self.freeform_canvas.bind("<Button-5>", self.on_freeform_canvas_zoom)    # Linux scroll down
+        
+        # Make canvas focusable for mouse wheel events
+        self.freeform_canvas.config(takefocus=True)
+        self.freeform_canvas.bind("<Enter>", lambda e: self.freeform_canvas.focus_set())
+        
+        # Bind keyboard shortcuts for zoom
+        self.freeform_canvas.bind("<KeyPress-plus>", lambda e: self.zoom_in_freeform())
+        self.freeform_canvas.bind("<KeyPress-equal>", lambda e: self.zoom_in_freeform())  # Plus without shift
+        self.freeform_canvas.bind("<KeyPress-minus>", lambda e: self.zoom_out_freeform())
+        self.freeform_canvas.bind("<KeyPress-0>", lambda e: self.reset_zoom_freeform())
+        
+        # Also bind to parent window for better accessibility
+        self.merge_preview_window.bind("<KeyPress-plus>", lambda e: self.zoom_in_freeform())
+        self.merge_preview_window.bind("<KeyPress-equal>", lambda e: self.zoom_in_freeform())
+        self.merge_preview_window.bind("<KeyPress-minus>", lambda e: self.zoom_out_freeform())
+        self.merge_preview_window.bind("<KeyPress-0>", lambda e: self.reset_zoom_freeform())
+        
+        # Bottom buttons
+        buttons_frame = tk.Frame(self.merge_preview_window, bg='#f0f0f0')
+        buttons_frame.pack(fill=tk.X, padx=10, pady=(0, 10))
+        
+        tk.Button(buttons_frame, text="❌ Cancel", command=self.cancel_merge,
+                 bg='#6c757d', fg='white', font=('Arial', 10, 'bold'),
+                 padx=20, pady=8).pack(side=tk.LEFT)
+        
+        tk.Button(buttons_frame, text="🔄 Reset Positions", command=self.reset_all_positions,
+                 bg='#17a2b8', fg='white', font=('Arial', 10, 'bold'),
+                 padx=20, pady=8).pack(side=tk.LEFT, padx=(10, 0))
+        
+        tk.Button(buttons_frame, text="✅ Confirm Arrangement", command=self.confirm_merge,
+                 bg='#28a745', fg='white', font=('Arial', 10, 'bold'),
+                 padx=20, pady=8).pack(side=tk.RIGHT)
+        
+        # Initialize positions and scales if not already set
+        while len(self.image_positions) < len(self.loaded_images):
+            i = len(self.image_positions)
+            default_x = (i * 150) % 1200  # Spread images horizontally with more space
+            default_y = (i * 150) // 1200 * 200  # Stack vertically when wrapping
+            self.image_positions.append((default_x, default_y))
+        
+        while len(self.image_scales) < len(self.loaded_images):
+            self.image_scales.append(1.0)
+        
+        # Initial canvas setup - start zoomed out to see the large canvas
+        self.freeform_zoom = 0.3  # Start zoomed out
+        self.selected_image_index = None  # No selection initially
+        self.update_freeform_canvas()
+        self.update_zoom_info()
+        
+        # Show initial status
+        self.update_status(f"Performance mode: Using {int(self.preview_scale_factor*100)}% preview images for fast dragging")
+    
+    def cancel_merge(self):
+        """Cancel the merge operation"""
+        self.merge_preview_window.destroy()
+        self.merge_preview_window = None
+        self.loaded_files = []
+        self.loaded_images = []
+        self.image_positions = []
+        self.image_scales = []
+        self.update_status("Merge cancelled")
+    
+    def update_freeform_canvas(self):
+        """Update the free-form canvas with current images and positions"""
+        try:
+            base_canvas_width = int(self.freeform_width_var.get())
+            base_canvas_height = int(self.freeform_height_var.get())
+        except ValueError:
+            base_canvas_width, base_canvas_height = 2000, 1500
+        
+        # Apply zoom to canvas dimensions
+        canvas_width = int(base_canvas_width * self.freeform_zoom)
+        canvas_height = int(base_canvas_height * self.freeform_zoom)
+        
+        # Clear canvas
+        self.freeform_canvas.delete("all")
+        
+        # Set canvas size (display window stays the same, but scroll region changes)
+        display_width = min(800, canvas_width)
+        display_height = min(600, canvas_height)
+        self.freeform_canvas.configure(width=display_width, height=display_height)
+        self.freeform_canvas.configure(scrollregion=(0, 0, canvas_width, canvas_height))
+        
+        # Draw background with clear boundaries
+        self.freeform_canvas.create_rectangle(0, 0, canvas_width, canvas_height, 
+                                            fill=self.canvas_background_color, outline='#333333', width=3)
+        
+        # Add a subtle grid for better positioning reference (every 500 pixels when zoomed out)
+        if self.freeform_zoom <= 0.5:  # Only show grid when zoomed out
+            grid_spacing = int(500 * self.freeform_zoom)
+            if grid_spacing > 20:  # Don't draw if too small
+                # Vertical lines
+                for x in range(grid_spacing, canvas_width, grid_spacing):
+                    self.freeform_canvas.create_line(x, 0, x, canvas_height, 
+                                                   fill='#e0e0e0', width=1, tags="grid")
+                # Horizontal lines  
+                for y in range(grid_spacing, canvas_height, grid_spacing):
+                    self.freeform_canvas.create_line(0, y, canvas_width, y, 
+                                                   fill='#e0e0e0', width=1, tags="grid")
+        
+        # Draw images using preview images for performance
+        self.freeform_canvas_images = []  # Store references to prevent garbage collection
+        self.preview_photos = []  # Store PhotoImage references
+        
+        # Only initialize positions if we need MORE positions, and only for NEW images
+        initial_positions_count = len(self.image_positions)
+        
+        # ONLY add positions for images that don't have them yet
+        if len(self.image_positions) < len(self.preview_images):
+            for i in range(len(self.image_positions), len(self.preview_images)):
+                default_x = (i * 150) % 1200  # Spread images horizontally with more space
+                default_y = (i * 150) // 1200 * 200  # Stack vertically when wrapping
+                self.image_positions.append((default_x, default_y))
+        
+        while len(self.image_scales) < len(self.preview_images):
+            self.image_scales.append(1.0)
+        
+
+        
+        for i, preview_img in enumerate(self.preview_images):
+                
+            base_x, base_y = self.image_positions[i]
+            image_scale = self.image_scales[i]
+            
+            # Apply zoom to position
+            x = int(base_x * self.freeform_zoom)
+            y = int(base_y * self.freeform_zoom)
+            
+            # Apply both image scaling and zoom scaling to preview image
+            total_scale = image_scale * self.freeform_zoom
+            
+            if total_scale != 1.0:
+                new_width = max(1, int(preview_img.width * total_scale))
+                new_height = max(1, int(preview_img.height * total_scale))
+                scaled_img = preview_img.resize((new_width, new_height), Image.Resampling.LANCZOS)
+            else:
+                scaled_img = preview_img
+            
+            # Create PhotoImage
+            photo = ImageTk.PhotoImage(scaled_img)
+            self.freeform_canvas_images.append(photo)  # Keep reference
+            self.preview_photos.append(photo)  # Also store for cleanup
+            
+            # Draw on canvas with tag for identification
+            img_id = self.freeform_canvas.create_image(x, y, anchor=tk.NW, image=photo, tags=f"img_{i}")
+            
+            # Draw selection border if this image is selected
+            if i == self.selected_image_index:
+                # Get image bounds for selection border
+                img_x1, img_y1 = x, y
+                img_x2 = img_x1 + scaled_img.width
+                img_y2 = img_y1 + scaled_img.height
+                
+                # Draw selection border
+                border_offset = self.selection_border_width // 2
+                self.freeform_canvas.create_rectangle(
+                    img_x1 - border_offset, img_y1 - border_offset,
+                    img_x2 + border_offset, img_y2 + border_offset,
+                    outline='#FF6B35', width=self.selection_border_width,
+                    tags="selection"
+                )
+                
+                # Add selection corners for visual feedback
+                corner_size = 8
+                corners = [
+                    (img_x1, img_y1), (img_x2, img_y1),  # Top corners
+                    (img_x1, img_y2), (img_x2, img_y2)   # Bottom corners
+                ]
+                for corner_x, corner_y in corners:
+                    self.freeform_canvas.create_rectangle(
+                        corner_x - corner_size//2, corner_y - corner_size//2,
+                        corner_x + corner_size//2, corner_y + corner_size//2,
+                        fill='#FF6B35', outline='white', width=2,
+                        tags="selection"
+                    )
+    
+    def on_freeform_canvas_click(self, event):
+        """Handle mouse click on free-form canvas"""
+        # Get canvas coordinates
+        canvas_x = self.freeform_canvas.canvasx(event.x)
+        canvas_y = self.freeform_canvas.canvasy(event.y)
+        
+        # Find which image was clicked
+        clicked_item = self.freeform_canvas.find_closest(canvas_x, canvas_y)[0]
+        tags = self.freeform_canvas.gettags(clicked_item)
+        
+        for tag in tags:
+            if tag.startswith("img_"):
+                image_index = int(tag.split("_")[1])
+                
+
+                
+                # Set as selected image with visual feedback
+                self.selected_image_index = image_index
+                # Don't start dragging immediately - wait for actual mouse movement
+                self.potential_drag_image = image_index
+                self.drag_start_pos = (canvas_x, canvas_y)
+                self.dragging_image = None  # Not actually dragging yet
+                
+
+                
+                # Select the image in the listbox
+                self.freeform_images_listbox.selection_clear(0, tk.END)
+                self.freeform_images_listbox.selection_set(image_index)
+                
+                # Update selection without full redraw for better performance
+                self.update_selection_indicators()
+                
+                # Update position controls
+                self.update_position_controls()
+                
+
+                
+                # Update status
+                self.update_status(f"Selected image {image_index + 1} - drag to move or use controls")
+                break
+        else:
+            self.dragging_image = None
+            self.potential_drag_image = None
+    
+    def update_selection_indicators(self):
+        """Update only the selection indicators without redrawing entire canvas"""
+        # Remove all existing selection indicators
+        self.freeform_canvas.delete("selection")
+        
+        # Add selection indicators for the currently selected image
+        if self.selected_image_index is not None and self.selected_image_index < len(self.preview_images):
+            i = self.selected_image_index
+            preview_img = self.preview_images[i]
+            
+            # Get position and scaling
+            base_x, base_y = self.image_positions[i]
+            image_scale = self.image_scales[i]
+            
+            # Apply zoom to position
+            x = int(base_x * self.freeform_zoom)
+            y = int(base_y * self.freeform_zoom)
+            
+            # Calculate scaled image size
+            total_scale = image_scale * self.freeform_zoom
+            if total_scale != 1.0:
+                scaled_width = max(1, int(preview_img.width * total_scale))
+                scaled_height = max(1, int(preview_img.height * total_scale))
+            else:
+                scaled_width = preview_img.width
+                scaled_height = preview_img.height
+            
+            # Draw selection border
+            img_x1, img_y1 = x, y
+            img_x2 = img_x1 + scaled_width
+            img_y2 = img_y1 + scaled_height
+            
+            border_offset = self.selection_border_width // 2
+            self.freeform_canvas.create_rectangle(
+                img_x1 - border_offset, img_y1 - border_offset,
+                img_x2 + border_offset, img_y2 + border_offset,
+                outline='#FF6B35', width=self.selection_border_width,
+                tags="selection"
+            )
+            
+            # Add selection corners
+            corner_size = 8
+            corners = [
+                (img_x1, img_y1), (img_x2, img_y1),  # Top corners
+                (img_x1, img_y2), (img_x2, img_y2)   # Bottom corners
+            ]
+            for corner_x, corner_y in corners:
+                self.freeform_canvas.create_rectangle(
+                    corner_x - corner_size//2, corner_y - corner_size//2,
+                    corner_x + corner_size//2, corner_y + corner_size//2,
+                    fill='#FF6B35', outline='white', width=2,
+                    tags="selection"
+                )
+        
+        # Update zoom info to show selection
+        self.update_zoom_info()
+    
+    def on_freeform_canvas_drag(self, event):
+        """Handle mouse drag on free-form canvas"""
+        canvas_x = self.freeform_canvas.canvasx(event.x)
+        canvas_y = self.freeform_canvas.canvasy(event.y)
+        
+        # Check if we have a potential drag that should start
+        if hasattr(self, 'potential_drag_image') and self.potential_drag_image is not None and self.drag_start_pos:
+            # Calculate movement in canvas coordinates
+            dx = canvas_x - self.drag_start_pos[0]
+            dy = canvas_y - self.drag_start_pos[1]
+            
+            # Only start dragging if movement is significant (more than 5 pixels)
+            if abs(dx) > 5 or abs(dy) > 5:
+                self.dragging_image = self.potential_drag_image
+                self.potential_drag_image = None
+
+        
+        # Handle actual drag
+        if self.dragging_image is not None and self.drag_start_pos:
+            # Calculate movement in canvas coordinates
+            dx = canvas_x - self.drag_start_pos[0]
+            dy = canvas_y - self.drag_start_pos[1]
+            
+            # Convert movement to base coordinates (account for zoom)
+            base_dx = dx / self.freeform_zoom
+            base_dy = dy / self.freeform_zoom
+            
+            # Update image position in base coordinates
+            old_x, old_y = self.image_positions[self.dragging_image]
+            new_x = max(0, old_x + base_dx)
+            new_y = max(0, old_y + base_dy)
+            
+
+            
+            # Get base canvas size
+            try:
+                base_canvas_width = int(self.freeform_width_var.get())
+                base_canvas_height = int(self.freeform_height_var.get())
+            except ValueError:
+                base_canvas_width, base_canvas_height = 2000, 1500
+            
+            # Get image size in base coordinates (accounting for image scale only)
+            img = self.loaded_images[self.dragging_image]
+            image_scale = self.image_scales[self.dragging_image] if self.dragging_image < len(self.image_scales) else 1.0
+            img_width = int(img.width * image_scale)
+            img_height = int(img.height * image_scale)
+            
+            # Constrain to base canvas bounds (but allow oversized images to move freely)
+            max_x = base_canvas_width - img_width
+            max_y = base_canvas_height - img_height
+            
+            if max_x >= 0 and max_y >= 0:
+                # Normal case: image fits within canvas bounds
+                new_x = min(new_x, max_x)
+                new_y = min(new_y, max_y)
+            # Otherwise: image is larger than canvas, allow free positioning
+            self.image_positions[self.dragging_image] = (new_x, new_y)
+            
+            # Update canvas
+            self.update_freeform_canvas()
+            
+
+            
+            self.update_position_controls()
+            
+            # Update drag start position
+            self.drag_start_pos = (canvas_x, canvas_y)
+    
+    def on_freeform_canvas_release(self, event):
+        """Handle mouse release on free-form canvas"""
+        self.dragging_image = None
+        self.drag_start_pos = None
+        if hasattr(self, 'potential_drag_image'):
+            self.potential_drag_image = None
+    
+    def on_freeform_canvas_motion(self, event):
+        """Handle mouse motion for cursor coordinates display"""
+        try:
+            canvas_x = self.freeform_canvas.canvasx(event.x)
+            canvas_y = self.freeform_canvas.canvasy(event.y)
+            
+            # Convert to actual canvas coordinates (accounting for zoom)
+            actual_x = canvas_x / self.freeform_zoom
+            actual_y = canvas_y / self.freeform_zoom
+            
+            # Update status with position info
+            if hasattr(self, 'perf_info_label'):
+                canvas_size = f"{int(self.freeform_width_var.get())}×{int(self.freeform_height_var.get())}"
+                coords_info = f"Position: ({int(actual_x)}, {int(actual_y)}) • Canvas: {canvas_size}px"
+                self.perf_info_label.config(text=coords_info)
+        except:
+            pass  # Ignore errors during window closing
+    
+    def on_freeform_canvas_zoom(self, event):
+        """Handle mouse wheel zoom on free-form canvas"""
+        # Get mouse position relative to canvas
+        canvas_x = self.freeform_canvas.canvasx(event.x)
+        canvas_y = self.freeform_canvas.canvasy(event.y)
+        
+        # Determine zoom direction
+        if event.delta > 0 or event.num == 4:  # Zoom in
+            zoom_factor = 1.1
+        else:  # Zoom out
+            zoom_factor = 0.9
+        
+        # Calculate new zoom level
+        new_zoom = self.freeform_zoom * zoom_factor
+        
+        # Clamp zoom level
+        new_zoom = max(self.freeform_zoom_min, min(new_zoom, self.freeform_zoom_max))
+        
+        # Only update if zoom level actually changed
+        if new_zoom != self.freeform_zoom:
+            # Calculate zoom center point
+            old_zoom = self.freeform_zoom
+            self.freeform_zoom = new_zoom
+            
+            # Get current scroll position
+            x_scroll = self.freeform_canvas.canvasx(0)
+            y_scroll = self.freeform_canvas.canvasy(0)
+            
+            # Update canvas display
+            self.update_freeform_canvas()
+            
+            # Adjust scroll position to zoom around mouse cursor
+            zoom_ratio = new_zoom / old_zoom
+            
+            # Calculate new scroll position to keep mouse position centered
+            new_x = (canvas_x * zoom_ratio) - event.x
+            new_y = (canvas_y * zoom_ratio) - event.y
+            
+            # Get canvas size to calculate scroll fractions
+            try:
+                canvas_width = int(self.freeform_width_var.get()) * self.freeform_zoom
+                canvas_height = int(self.freeform_height_var.get()) * self.freeform_zoom
+            except (ValueError, AttributeError):
+                canvas_width, canvas_height = 2000 * self.freeform_zoom, 1500 * self.freeform_zoom
+            
+            # Scroll to new position
+            if canvas_width > 0 and canvas_height > 0:
+                x_fraction = max(0, min(1, new_x / canvas_width))
+                y_fraction = max(0, min(1, new_y / canvas_height))
+                
+                self.freeform_canvas.xview_moveto(x_fraction)
+                self.freeform_canvas.yview_moveto(y_fraction)
+            
+            # Update zoom info in UI
+            self.update_zoom_info()
+    
+    def on_freeform_image_select(self, event):
+        """Handle image selection in listbox"""
+        selection = self.freeform_images_listbox.curselection()
+        if selection:
+            self.update_position_controls()
+    
+    def update_position_controls(self):
+        """Update position and scale controls for selected image"""
+        selection = self.freeform_images_listbox.curselection()
+        if selection:
+            idx = selection[0]
+            if idx < len(self.image_positions):
+                x, y = self.image_positions[idx]
+
+                self.img_x_var.set(str(int(x)))
+                self.img_y_var.set(str(int(y)))
+            
+            if idx < len(self.image_scales):
+                scale = self.image_scales[idx]
+                self.img_scale_var.set(f"{scale:.2f}")
+    
+    def update_selected_image_position(self, event=None):
+        """Update position of selected image from text controls"""
+        selection = self.freeform_images_listbox.curselection()
+        if selection:
+            idx = selection[0]
+            try:
+                x = int(self.img_x_var.get())
+                y = int(self.img_y_var.get())
+                
+                # Get canvas size
+                try:
+                    canvas_width = int(self.freeform_width_var.get())
+                    canvas_height = int(self.freeform_height_var.get())
+                except ValueError:
+                    canvas_width, canvas_height = 2000, 1500
+                
+                # Get image size
+                img = self.loaded_images[idx]
+                scale = self.image_scales[idx] if idx < len(self.image_scales) else 1.0
+                img_width = int(img.width * scale)
+                img_height = int(img.height * scale)
+                
+                # Constrain to canvas bounds
+                x = max(0, min(x, canvas_width - img_width))
+                y = max(0, min(y, canvas_height - img_height))
+                
+                self.image_positions[idx] = (x, y)
+                self.update_freeform_canvas()
+                
+            except ValueError:
+                pass  # Invalid input, ignore
+    
+    def update_selected_image_scale(self, event=None):
+        """Update scale of selected image from text controls"""
+        selection = self.freeform_images_listbox.curselection()
+        if selection:
+            idx = selection[0]
+            try:
+                scale = float(self.img_scale_var.get())
+                scale = max(0.1, min(scale, 5.0))  # Limit scale between 0.1 and 5.0
+                
+                if idx < len(self.image_scales):
+                    self.image_scales[idx] = scale
+                else:
+                    # Extend list if needed
+                    while len(self.image_scales) <= idx:
+                        self.image_scales.append(1.0)
+                    self.image_scales[idx] = scale
+                
+                self.update_freeform_canvas()
+                self.update_position_controls()
+                
+            except ValueError:
+                pass  # Invalid input, ignore
+    
+    def reset_selected_image_scale(self):
+        """Reset scale of selected image to 1.0"""
+        selection = self.freeform_images_listbox.curselection()
+        if selection:
+            idx = selection[0]
+            if idx < len(self.image_scales):
+                self.image_scales[idx] = 1.0
+                self.img_scale_var.set("1.0")
+                self.update_freeform_canvas()
+    
+    def reset_all_positions(self):
+        """Reset all image positions to default grid layout"""
+        if messagebox.askyesno("Reset Positions", "Reset all images to default positions?"):
+            canvas_width = int(self.freeform_width_var.get())
+            canvas_height = int(self.freeform_height_var.get())
+            
+            self.image_positions = []
+            self.image_scales = []
+            
+            for i, img in enumerate(self.loaded_images):
+                # Grid layout
+                cols = int(len(self.loaded_images) ** 0.5) + 1
+                row = i // cols
+                col = i % cols
+                
+                x = col * (canvas_width // cols)
+                y = row * (canvas_height // cols)
+                
+                # Ensure image fits
+                if x + img.width > canvas_width:
+                    x = max(0, canvas_width - img.width)
+                if y + img.height > canvas_height:
+                    y = max(0, canvas_height - img.height)
+                
+                self.image_positions.append((x, y))
+                self.image_scales.append(1.0)
+            
+            self.update_freeform_canvas()
+            self.update_position_controls()
+    
+    def update_zoom_info(self):
+        """Update zoom information in the UI"""
+        if hasattr(self, 'zoom_info_label'):
+            zoom_percent = int(self.freeform_zoom * 100)
+            # Show performance mode indicator
+            performance_info = f" • Performance Mode: {len(self.preview_images)} previews" if hasattr(self, 'preview_images') else ""
+            selection_info = f" • Selected: Image {self.selected_image_index + 1}" if self.selected_image_index is not None else ""
+            self.zoom_info_label.config(text=f"Zoom: {zoom_percent}%{performance_info}{selection_info}")
+    
+    def zoom_in_freeform(self):
+        """Zoom in on freeform canvas"""
+        new_zoom = min(self.freeform_zoom * 1.2, self.freeform_zoom_max)
+        if new_zoom != self.freeform_zoom:
+            self.freeform_zoom = new_zoom
+            self.update_freeform_canvas()
+            self.update_zoom_info()
+    
+    def zoom_out_freeform(self):
+        """Zoom out on freeform canvas"""
+        new_zoom = max(self.freeform_zoom / 1.2, self.freeform_zoom_min)
+        if new_zoom != self.freeform_zoom:
+            self.freeform_zoom = new_zoom
+            self.update_freeform_canvas()
+            self.update_zoom_info()
+    
+    def reset_zoom_freeform(self):
+        """Reset zoom to 100%"""
+        if self.freeform_zoom != 1.0:
+            self.freeform_zoom = 1.0
+            self.update_freeform_canvas()
+            self.update_zoom_info()
+    
+    def choose_background_color(self):
+        """Choose background color for free-form canvas"""
+        color = colorchooser.askcolor(title="Choose Background Color", 
+                                     initialcolor=self.canvas_background_color)
+        if color[1]:  # If user didn't cancel
+            self.canvas_background_color = color[1]
+            # Update button appearance
+            self.bg_color_button.configure(bg=color[1], 
+                                         text=f"⬜ {color[1].upper()}" if color[1] != '#ffffff' else "⬜ White")
+            self.update_freeform_canvas()
+    
+    def export_merged_image(self, merged_image, file_count=None):
+        """Export the merged image with suggested filename"""
+        if file_count is None:
+            file_count = len(self.loaded_files) if self.loaded_files else 1
+        suggested_name = f"merged_image_{file_count}_files.tiff"
+        
+        file_path = filedialog.asksaveasfilename(
+            title="Save Merged Image",
+            initialfile=suggested_name,
+            defaultextension=".tiff",
+            filetypes=[("TIFF files", "*.tiff"), ("PNG files", "*.png"), 
+                      ("JPEG files", "*.jpg"), ("All files", "*.*")]
+        )
+        
+        if file_path:
+            try:
+                merged_image.save(file_path)
+                messagebox.showinfo("Success", f"Merged image saved successfully!\n\nLocation: {file_path}")
+                
+            except Exception as e:
+                messagebox.showerror("Error", f"Failed to save merged image: {str(e)}")
 
 
 def main():
