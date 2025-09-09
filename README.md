@@ -1,15 +1,35 @@
-# Professional TIFF Image Editor
+# 🎯 Advanced TIFF Image Editor & Multi-Image Merger
 
-A comprehensive Python application for editing high-resolution TIFF images with professional measurement tools, precision controls, and advanced navigation. Made to manage big tiff files.
+A comprehensive Python application for editing gigapixel TIFF images with professional measurement tools, advanced multi-image merging capabilities, and performance-optimized workflows. Handle ANY size TIFF files with ease!
 
 ## ✨ Features
 
-### 🎯 **Core Functionality**
-- **Load High-Resolution TIFF Images**: Support for large TIFF files with automatic DPI detection
+### 🚀 **Multi-Image Merge System (NEW!)**
+- **Drag & Drop Interface**: Visual positioning of multiple TIFF images on a large canvas
+- **Freeform Arrangement**: Position images anywhere with precise control
+- **Performance Optimized**: 15% preview scaling for smooth interaction with gigapixel images
+- **Dynamic Canvas Sizing**: Automatically calculates optimal canvas size to fit all images
+- **Smart Coordinate System**: Preview positioning scales perfectly to full-resolution export
+- **Orange Selection Borders**: Clear visual indication of selected images during positioning
+- **Real-time Preview**: See exactly how your merged image will look
+
+### 🎯 **Single Image Editing**
+- **Load Gigapixel TIFF Images**: Support for ANY size TIFF files with automatic DPI detection
+- **Intelligent Performance Scaling**: Automatic preview scaling for large images (>25MP gets performance mode)
 - **Free Drawing Selection Tool**: Draw freehand selections around areas of interest  
 - **Color Assignment & Overlays**: Assign custom colors with opacity control to selected sections
 - **Clipped Sections**: Cut out sections with transparency and colored overlays
 - **Professional Section Management**: Move, rearrange, duplicate, and manage multiple selections
+
+### 🎛️ **Performance & Quality Management**
+- **Smart Performance Scaling**: 
+  - >100MP images: 30% preview for smooth interaction
+  - >50MP images: 50% preview scaling  
+  - >25MP images: 70% preview scaling
+  - <25MP images: Full resolution display
+- **Full Quality Exports**: Always exports at full resolution regardless of preview scaling
+- **Export Verification**: Confirmation dialog shows exact export resolution and megapixels
+- **Visibility-First Design**: Ensures images remain visible and usable at all scales
 
 ### 📐 **Professional Measurement Tools**
 - **Centimeter-Based Grid System**: Professional grid with major/minor lines and cm labels
@@ -19,18 +39,20 @@ A comprehensive Python application for editing high-resolution TIFF images with 
 - **Real-time Coordinate Display**: All positions shown in professional cm units
 
 ### 🎮 **Advanced Navigation**
-- **Mouse Wheel Zoom**: Zoom in/out centered on cursor position
-- **WASD + Arrow Key Navigation**: Pan around the image with keyboard
-- **Smart Focus System**: Click on image to enable navigation, click UI to disable
+- **Mouse Wheel Zoom**: Zoom in/out centered on cursor position (both single & multi-image modes)
+- **WASD + Arrow Key Navigation**: Pan around images with keyboard
+- **Smart Focus System**: Click on canvas to enable navigation, click UI to disable
+- **Multi-Image Canvas**: Large 5000×4000px default canvas with 30% default zoom
 - **Keyboard Shortcuts**: Professional keyboard controls for all operations
 - **Speed Controls**: Hold Shift for faster navigation and movement
 
-### 🎨 **Advanced Tools**
+### 🎨 **Advanced Visual Tools**
 - **Vertical Guide Lines**: Configurable guide lines for alignment
 - **Brush Size Control**: Adjustable selection brush with visual feedback
 - **Grid Snapping**: Snap movements to grid for precise positioning
 - **Sub-pixel Precision Mode**: Ultra-precise positioning when needed
 - **Real-time Status Feedback**: Live coordinate display and operation status
+- **Visual Selection Indicators**: Orange borders for selected images in multi-image mode
 
 ## 🚀 **Quick Start**
 
@@ -76,28 +98,52 @@ Build a standalone executable for distribution:
 
 ## 📖 **Usage Guide**
 
-### Basic Workflow
+### 🔀 **Multi-Image Merge Workflow (NEW!)**
+1. **Load Multiple Images**: Click "Load Multiple Files" and select your TIFF files
+2. **Automatic Performance Mode**: Large images automatically use preview scaling for smooth interaction
+3. **Drag & Drop Positioning**: 
+   - Click and drag images to position them on the canvas
+   - Orange borders show selected images
+   - Use mouse wheel to zoom in/out for precise positioning
+4. **Arrange Layout**: Position images exactly where you want them in the final merge
+5. **Preview & Export**: 
+   - See real-time preview of your arrangement
+   - Click "Export Merged Image" to create full-resolution composite
+   - Dynamic canvas automatically sizes to fit all positioned images
+
+### 🎯 **Single Image Editing Workflow**
 1. **Load Image**: Click "Load TIFF" and select your TIFF file (DPI auto-detected)
-2. **Enable Navigation**: Click on image to enable mouse wheel zoom and WASD navigation
-3. **Select Areas**: Use Clip mode to draw selections around areas of interest
-4. **Assign Colors**: Choose colors from picker with opacity control  
-5. **Move Sections**: Switch to Move mode, select sections, use gamepad controls or arrow keys
-6. **Measure**: Use the ruler tool for precise measurements in centimeters
-7. **Export**: Save your edited image with professional measurements
+2. **Automatic Performance Scaling**: Large images (>25MP) automatically use preview scaling
+3. **Enable Navigation**: Click on image to enable mouse wheel zoom and WASD navigation
+4. **Select Areas**: Use Clip mode to draw selections around areas of interest
+5. **Assign Colors**: Choose colors from picker with opacity control  
+6. **Move Sections**: Switch to Move mode, select sections, use gamepad controls or arrow keys
+7. **Measure**: Use the ruler tool for precise measurements in centimeters
+8. **Export**: Save your edited image with full resolution quality verification
 
 ### 🎮 **Navigation Controls**
-- **🖱️ Mouse Wheel**: Zoom in/out at cursor location
-- **WASD / Arrow Keys**: Navigate around image (click on image first to enable)
+- **🖱️ Mouse Wheel**: Zoom in/out at cursor location (works in both single & multi-image modes)
+- **WASD / Arrow Keys**: Navigate around canvas (click on canvas first to enable)
 - **Shift + Navigation**: Faster panning/movement  
-- **Click Image**: Enable navigation mode (✅ green status)
+- **Click Canvas**: Enable navigation mode (✅ green status)
 - **Click UI Elements**: Disable navigation mode (❌ red status)
+- **Drag & Drop**: Click and drag images in multi-image mode for positioning
+
+### 🚀 **Performance Features**
+- **Intelligent Scaling**: Automatic performance optimization based on image size
+- **Smooth Interactions**: Preview scaling ensures responsive drag-and-drop
+- **Quality Preservation**: Full resolution always maintained for exports
+- **Memory Management**: Efficient handling of gigapixel images
+- **Real-time Preview**: See exactly how your final merge will look
 
 ### 🎯 **Professional Features**
-- **Centimeter Grid**: All measurements in professional cm units
-- **Ruler Tool**: Drag to measure distances accurately
+- **Multi-Image Compositing**: Merge multiple TIFF images with precise positioning
+- **Dynamic Canvas Sizing**: Automatically calculates optimal output dimensions
+- **Centimeter Grid**: All measurements in professional cm units (single image mode)
+- **Ruler Tool**: Drag to measure distances accurately (single image mode)
 - **DPI Detection**: Automatic extraction from TIFF metadata
 - **Precision Movement**: Move sections by exact cm values using gamepad controls
-- **Section Coordinates**: All positions displayed in centimeters
+- **Export Verification**: Detailed confirmation of export resolution and quality
 
 ## 🛠️ **Technical Details**
 
@@ -119,11 +165,13 @@ mover/
 - **PyInstaller**: For building standalone executables
 
 ### Key Improvements
-- **Centimeter-Only Workflow**: Removed pixel options for professional consistency
-- **Mouse Wheel Zoom**: Smooth zooming centered on cursor
-- **Smart Navigation**: WASD/arrow key panning with focus control
-- **DPI-Aware Measurements**: All measurements in real-world units
-- **Professional UI**: Clean, organized interface with clear feedback
+- **Multi-Image Merge System**: Complete drag-and-drop interface for merging multiple TIFF files
+- **Performance-Optimized Preview**: Intelligent scaling system for smooth interaction with gigapixel images
+- **Dynamic Canvas Management**: Automatically sizes output canvas to fit positioned images
+- **Quality Assurance**: Full resolution exports with verification dialogs
+- **Smart Coordinate System**: Preview positioning perfectly scales to full-resolution output
+- **Enhanced Navigation**: Mouse wheel zoom and WASD navigation work in both single and multi-image modes
+- **Professional UI**: Clean, organized interface with clear visual feedback and selection indicators
 
 ## 📦 **Building Executables**
 
@@ -165,22 +213,37 @@ python build_cross_platform.py linux
 - **Focus Management**: Red ❌ = navigation disabled, Green ✅ = navigation enabled
 - **Measurement Consistency**: Ruler and grid now use identical cm calculations
 
-## 🎯 **Professional Workflow**
+## 🎯 **Professional Workflows**
 
-### For Technical Documentation
+### 🔀 **Multi-Image Compositing**
+1. **Document Assembly**: Combine multiple scanned pages or sections into single composite
+2. **Technical Drawing Merge**: Join multiple technical drawings with precise alignment
+3. **Panoramic Creation**: Merge overlapping images into wide panoramic views
+4. **Comparison Layouts**: Position multiple versions side-by-side for comparison
+5. **Quality Control**: Performance preview ensures smooth positioning, full-resolution export ensures quality
+
+### 📐 **Single Image Analysis** 
 1. **Load TIFF**: High-resolution technical drawings or scanned documents
-2. **Set DPI**: Automatic detection ensures accurate cm measurements  
+2. **Automatic Performance Mode**: Large images automatically optimized for smooth interaction
 3. **Enable Grid**: 1cm grid with major/minor lines for professional alignment
 4. **Measure Components**: Use ruler tool for precise distance measurements
 5. **Section Selection**: Select components with accurate boundary detection
 6. **Color Coding**: Assign colors to different component types or categories
-7. **Export**: Generate professional documentation with measured annotations
+7. **Full-Resolution Export**: Generate professional documentation with verified quality
 
-### Architecture & Engineering
-- **Scale Accuracy**: True-to-scale measurements in centimeters
+### 🏗️ **Architecture & Engineering Applications**
+- **Multi-Sheet Assembly**: Combine multiple architectural sheets into complete floor plans
+- **Scale Accuracy**: True-to-scale measurements in centimeters (single image mode)
 - **Component Analysis**: Color-code different building elements or systems
 - **Dimension Verification**: Cross-check measurements with ruler tool
 - **Professional Output**: Clean, measured drawings ready for documentation
+- **Gigapixel Support**: Handle even the largest technical drawings with smooth performance
+
+### 📊 **Performance Optimization Use Cases**
+- **Large File Handling**: Smooth interaction with 100MP+ images
+- **Memory Efficiency**: Work with multiple gigapixel images simultaneously  
+- **Quality Assurance**: Export verification ensures no quality loss in final output
+- **Workflow Efficiency**: Performance preview + full-resolution export = best of both worlds
 
 ## 📄 **License**
 
