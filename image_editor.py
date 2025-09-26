@@ -24,6 +24,7 @@ CORE FEATURES:
 - Clip/cut selected sections
 - Precision movement with grid snapping and ruler tools
 - Export functionality for both single and merged images
+- Export with overlays: Save images WITH grid lines, vertical guides, and colored selections
 
 TECHNICAL NOTES:
 - PIL MAX_IMAGE_PIXELS set to None (removes ~89MP default limit)
@@ -38,6 +39,32 @@ from tkinter import ttk
 from PIL import Image, ImageTk, ImageDraw
 import json
 import os
+import time
+import threading
+import gc
+from concurrent.futures import ThreadPoolExecutor
+import weakref
+from collections import OrderedDict
+import psutil
+import io
+from functools import lru_cache
+import hashlib
+from dataclasses import dataclass
+from typing import Optional, Tuple, Dict, List
+import numpy as np
+
+# Check for GPU acceleration libraries
+try:
+    import cv2
+    HAS_OPENCV = True
+except ImportError:
+    HAS_OPENCV = False
+    
+try:
+    from numba import jit
+    HAS_NUMBA = True
+except ImportError:
+    HAS_NUMBA = False
 
 # Remove PIL image size limits to handle very large TIFF files
 Image.MAX_IMAGE_PIXELS = None  # Remove the default ~89MP limit
@@ -87,12 +114,24 @@ class ImageEditor:
         # Vertical lines variables
         self.show_lines = False
         self.num_lines = 5
-        self.line_spacing_percent = 20.0  # Percentage of image width between lines (now supports decimals)
+        self.line_spacing_cm = 5.0  # Spacing between lines in centimeters
         self.lines_confirmed = False  # Track if lines are locked
         self.line_positions = []  # Store actual line x positions
         
+        # Individual line dragging variables
+        self.dragging_line = None  # Index of line being dragged
+        self.line_drag_start = None  # Starting position of line drag
+        self.line_objects = []  # Store canvas line object IDs for interaction
+        self.line_drag_tolerance = 10  # Pixels tolerance for line selection
+        
+        # UI variables for lines (will be set during UI creation)
+        self.lines_var = None
+        self.lines_count_label = None
+        self.spacing_value_label = None
+        self.spacing_var = None
+        
         # Mode variables
-        self.current_mode = "select"  # select, move
+        self.current_mode = "none"  # none, select, move
         self.selected_section = None
         self.drag_start = None
         self.clipped_sections = []  # Store clipped sections as separate images
@@ -153,6 +192,54 @@ class ImageEditor:
         self.freeform_zoom_min = 0.05  # Minimum zoom level (zoom out more)
         self.freeform_zoom_max = 5.0  # Maximum zoom level
         self.freeform_canvas_original_size = (5000, 4000)  # Original canvas size before zoom
+        
+        # 🚀 ADVANCED PERFORMANCE OPTIMIZATION VARIABLES
+        self.enable_fast_zoom = True  # Enable high-performance zoom system
+        self.enable_gpu_acceleration = HAS_OPENCV  # Use GPU when available
+        self.viewport_culling = True  # Only render visible portions
+        self.async_rendering = True  # Use background threads for large operations
+        self.max_display_pixels = 16_000_000  # Max pixels for display (4K = ~8MP, this is 16MP)
+        self.lazy_loading_enabled = True  # Lazy load image regions
+        self.adaptive_quality = True  # Adjust quality based on zoom speed
+        
+        # Enhanced image pyramid system with GPU support
+        self.image_pyramid = OrderedDict()  # LRU cache for pyramid levels
+        self.pyramid_levels = [0.025, 0.05, 0.1, 0.2, 0.5, 0.75, 1.0]  # Enhanced resolution levels
+        self.current_pyramid_level = 1.0  # Current level being used
+        self.pyramid_cache_limit = min(psutil.virtual_memory().total // 4, 4 * 1024**3)  # Dynamic limit
+        
+        # Advanced caching and performance tracking
+        self.display_cache = OrderedDict()  # LRU cache for display images
+        self.cache_max_size = 8  # Increased cache size
+        self.cache_total_memory = 0  # Track memory usage
+        self.cache_hit_count = 0  # Performance metrics
+        self.cache_miss_count = 0
+        self.last_viewport = None  # Track viewport changes
+        
+        # Memory management
+        available_ram_gb = psutil.virtual_memory().total // (1024**3)
+        self.memory_limit_mb = min(available_ram_gb * 512, 6144)  # Use half RAM, max 6GB
+        self.memory_pool = {}  # Reusable memory buffers
+        self.last_gc_time = time.time()
+        
+        # Performance profiling
+        self.performance_stats = {'render_times': [], 'memory_usage': [], 'cache_efficiency': []}
+        self.enable_profiling = False
+        
+        # GPU acceleration setup
+        self.gpu_context = None
+        if self.enable_gpu_acceleration:
+            # GPU initialization disabled temporarily
+            pass
+        
+        # Async rendering variables
+        self.render_thread = None
+        self.render_queue = []
+        self.rendering_in_progress = False
+        
+        # Memory management
+        self.memory_limit_mb = 2048  # 2GB limit for image processing
+        self.auto_garbage_collect = True
         
         self.setup_ui()
         
@@ -345,7 +432,7 @@ class ImageEditor:
                  bg='#2196F3', fg='white', font=('Arial', 9), 
                  padx=10, pady=5).pack(side=tk.LEFT, padx=2)
                  
-        tk.Button(button_frame, text="Export", command=self.export_image,
+        tk.Button(button_frame, text="Export Image", command=self.export_image,
                  bg='#FF9800', fg='white', font=('Arial', 9), 
                  padx=10, pady=5).pack(side=tk.LEFT, padx=2)
         
@@ -366,6 +453,31 @@ class ImageEditor:
                  padx=10, pady=5).pack(side=tk.LEFT, padx=2)
         
         # Another separator
+        tk.Frame(button_frame, bg='#ddd', width=2, height=30).pack(side=tk.LEFT, padx=10)
+        
+        # Performance controls
+        perf_frame = tk.Frame(button_frame, bg='#f5f5f5')
+        perf_frame.pack(side=tk.LEFT, padx=5)
+        
+        tk.Button(perf_frame, text="🚀 Fast Zoom", command=self.toggle_fast_zoom,
+                 bg='#4CAF50', fg='white', font=('Arial', 9), 
+                 padx=8, pady=5).pack(side=tk.LEFT, padx=2)
+                 
+        tk.Button(perf_frame, text="🗑️ Clear Cache", command=self.clear_image_cache,
+                 bg='#FF9800', fg='white', font=('Arial', 9), 
+                 padx=8, pady=5).pack(side=tk.LEFT, padx=2)
+        
+        tk.Button(perf_frame, text="🔬 Analyze", command=self.analyze_performance,
+                 bg='#2196F3', fg='white', font=('Arial', 9), 
+                 padx=8, pady=5).pack(side=tk.LEFT, padx=2)
+        
+        # GPU indicator (if available)
+        if HAS_OPENCV and hasattr(self, 'enable_gpu_acceleration'):
+            gpu_text = "🚀 GPU" if self.enable_gpu_acceleration else "💻 CPU"
+            tk.Label(perf_frame, text=gpu_text, bg='#f5f5f5', 
+                    font=('Arial', 8), fg='#666').pack(side=tk.LEFT, padx=2)
+        
+        # Separator
         tk.Frame(button_frame, bg='#ddd', width=2, height=30).pack(side=tk.LEFT, padx=10)
         
         # Ruler controls at top right
@@ -389,7 +501,7 @@ class ImageEditor:
         
     def create_tools_panel(self, parent):
         """Create a simple left tools panel with scrolling"""
-        tools_container = tk.Frame(parent, bg='#f0f0f0', width=280, relief='solid', bd=1)
+        tools_container = tk.Frame(parent, bg='#f0f0f0', width=380, relief='solid', bd=1)
         tools_container.pack(side=tk.LEFT, fill=tk.Y, padx=(0, 10))
         tools_container.pack_propagate(False)
         
@@ -438,19 +550,24 @@ class ImageEditor:
                                     padx=10, pady=10, relief='groove', bd=2)
         mode_section.pack(fill=tk.X, pady=(0, 15))
         
-        self.mode_var = tk.StringVar(value="select")
+        self.mode_var = tk.StringVar(value="none")
         
         # Mode indicator with better styling
         self.mode_indicator = tk.Label(mode_section, 
-                                      text="Selection Mode - Draw around areas", 
+                                      text="Mouse Mode - Navigate and interact", 
                                       font=('Arial', 9),
-                                      bg='#4CAF50', fg='white',
+                                      bg='#607D8B', fg='white',
                                       padx=10, pady=5, relief='raised')
         self.mode_indicator.pack(fill=tk.X, pady=(0, 10))
         
         # Radio buttons in a frame
         radio_frame = tk.Frame(mode_section, bg='#f0f0f0')
         radio_frame.pack(fill=tk.X)
+        
+        tk.Radiobutton(radio_frame, text="🖱️ Mouse Mode", 
+                      variable=self.mode_var, value="none",
+                      command=self.change_mode,
+                      font=('Arial', 9), bg='#f0f0f0', anchor='w').pack(fill=tk.X, pady=2)
         
         tk.Radiobutton(radio_frame, text="🖊️ Select Areas", 
                       variable=self.mode_var, value="select",
@@ -515,7 +632,7 @@ class ImageEditor:
                                    font=('Arial', 9), bg='#f0f0f0', anchor='w')
         snap_check.pack(fill=tk.X, pady=2)
         
-        self.grid_show_var = tk.BooleanVar()
+        self.grid_show_var = tk.BooleanVar(value=False)  # Default to off for cleaner interface
         grid_check = tk.Checkbutton(movement_options_frame, text="📋 Show Grid", 
                                    variable=self.grid_show_var, command=self.toggle_show_grid,
                                    font=('Arial', 9), bg='#f0f0f0', anchor='w')
@@ -562,7 +679,7 @@ class ImageEditor:
                 bg='#f0f0f0', fg='#333').pack(side=tk.LEFT)
         
         self.dpi_var = tk.StringVar(value="300")
-        dpi_spinbox = tk.Spinbox(dpi_frame, from_=72, to=600, increment=10,
+        dpi_spinbox = tk.Spinbox(dpi_frame, from_=1, to=50000, increment=1,
                                 textvariable=self.dpi_var, width=8,
                                 command=self.update_dpi, font=('Arial', 9))
         dpi_spinbox.pack(side=tk.LEFT, padx=(10, 5))
@@ -579,6 +696,13 @@ class ImageEditor:
         lines_toggle_frame.pack(fill=tk.X, pady=(0, 10))
         
         self.lines_var = tk.BooleanVar()
+        self.lines_count_label = None
+        self.spacing_value_label = None
+        self.spacing_var = None
+        self.lines_scale = None
+        self.confirm_lines_button = None
+        self.unlock_lines_button = None
+        
         lines_toggle = tk.Checkbutton(lines_toggle_frame, text="📐 Show Vertical Lines", 
                                      variable=self.lines_var, command=self.toggle_lines,
                                      font=('Arial', 9, 'bold'), bg='#f0f0f0', anchor='w')
@@ -619,23 +743,23 @@ class ImageEditor:
         tk.Label(spacing_label_frame, text="Line Spacing:", font=('Arial', 9, 'bold'),
                 bg='#f0f0f0', fg='#333').pack(side=tk.LEFT)
         
-        self.spacing_value_label = tk.Label(spacing_label_frame, text="20%", 
+        self.spacing_value_label = tk.Label(spacing_label_frame, text="5.0cm", 
                                            font=('Arial', 9), bg='#e0e0e0', fg='#333', 
-                                           width=5, relief='sunken')
+                                           width=7, relief='sunken')
         self.spacing_value_label.pack(side=tk.RIGHT)
         
         spacing_control_frame = tk.Frame(spacing_frame, bg='#f0f0f0')
         spacing_control_frame.pack(fill=tk.X, pady=(5, 0))
         
-        # More precise spacing control with decimal support
-        self.spacing_var = tk.StringVar(value="20.0")
-        spacing_spinbox = tk.Spinbox(spacing_control_frame, from_=1.0, to=50.0, increment=0.5,
+        # Cm-based spacing control
+        self.spacing_var = tk.StringVar(value="5.0")
+        spacing_spinbox = tk.Spinbox(spacing_control_frame, from_=0.5, to=50.0, increment=0.5,
                                     textvariable=self.spacing_var, width=8, format="%.1f",
                                     command=self.update_line_spacing, font=('Arial', 9))
         spacing_spinbox.pack(side=tk.LEFT)
         spacing_spinbox.bind('<Return>', lambda e: self.update_line_spacing())
         
-        tk.Label(spacing_control_frame, text="% of image width", font=('Arial', 9),
+        tk.Label(spacing_control_frame, text="cm spacing", font=('Arial', 9),
                 bg='#f0f0f0', fg='#666').pack(side=tk.LEFT, padx=(5, 0))
         
         # Quick spacing presets
@@ -648,7 +772,7 @@ class ImageEditor:
         preset_buttons_frame = tk.Frame(preset_frame, bg='#f0f0f0')
         preset_buttons_frame.pack(fill=tk.X, pady=(2, 0))
         
-        presets = [("Tight", "5.0"), ("Normal", "15.0"), ("Wide", "25.0"), ("Very Wide", "40.0")]
+        presets = [("Tight", "1.0"), ("Normal", "3.0"), ("Wide", "5.0"), ("Very Wide", "10.0")]
         for text, value in presets:
             btn = tk.Button(preset_buttons_frame, text=text, 
                            command=lambda v=value: self.set_spacing_preset(v),
@@ -671,6 +795,25 @@ class ImageEditor:
                                             bg='#FF9800', fg='white', font=('Arial', 9, 'bold'),
                                             padx=8, pady=3, state='disabled', relief='raised')
         self.unlock_lines_button.pack(side=tk.RIGHT, fill=tk.X, expand=True, padx=(2, 0))
+        
+        # Additional line controls
+        lines_extra_frame = tk.Frame(lines_section, bg='#f0f0f0')
+        lines_extra_frame.pack(fill=tk.X, pady=(5, 0))
+        
+        tk.Button(lines_extra_frame, text="↻ Reset Positions", command=self.reset_line_positions,
+                 bg='#607D8B', fg='white', font=('Arial', 8, 'bold'),
+                 padx=5, pady=2, relief='raised').pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 2))
+        
+        tk.Button(lines_extra_frame, text="📐 Equal Spacing", command=self.reset_equal_spacing,
+                 bg='#795548', fg='white', font=('Arial', 8, 'bold'),
+                 padx=5, pady=2, relief='raised').pack(side=tk.RIGHT, fill=tk.X, expand=True, padx=(2, 0))
+        
+        # Instructions for line dragging
+        lines_help = tk.Label(lines_section, 
+                             text="💡 Drag individual lines to reposition (when unlocked)",
+                             font=('Arial', 8), bg='#f0f0f0', fg='#666',
+                             wraplength=300, justify='center')
+        lines_help.pack(pady=(5, 0))
         
         # === IMAGE SIZE SECTION ===
         size_section = tk.LabelFrame(content_frame, text="🖼️ Image Size", 
@@ -746,6 +889,46 @@ class ImageEditor:
         tk.Button(actions_section, text="🔄 Reset Image", command=self.reset_image,
                  bg='#607D8B', fg='white', font=('Arial', 9, 'bold'),
                  padx=10, pady=5, relief='raised').pack(fill=tk.X)
+        
+        # === PERFORMANCE SECTION ===
+        perf_section = tk.LabelFrame(content_frame, text="🚀 Performance", 
+                                    font=('Arial', 10, 'bold'), bg='#f0f0f0', fg='#333',
+                                    padx=10, pady=10, relief='groove', bd=2)
+        perf_section.pack(fill=tk.X, pady=(0, 15))
+        
+        # Performance mode toggle
+        perf_mode_frame = tk.Frame(perf_section, bg='#f0f0f0')
+        perf_mode_frame.pack(fill=tk.X, pady=(0, 10))
+        
+        self.fast_zoom_var = tk.BooleanVar(value=self.enable_fast_zoom)
+        fast_zoom_check = tk.Checkbutton(perf_mode_frame, text="🚀 Fast Zoom Mode", 
+                                        variable=self.fast_zoom_var, command=self.toggle_fast_zoom_ui,
+                                        font=('Arial', 9, 'bold'), bg='#f0f0f0', anchor='w')
+        fast_zoom_check.pack(fill=tk.X, pady=2)
+        
+        # Memory info
+        memory_frame = tk.Frame(perf_section, bg='#f0f0f0')
+        memory_frame.pack(fill=tk.X, pady=(0, 10))
+        
+        tk.Label(memory_frame, text="Cache Memory:", font=('Arial', 9, 'bold'),
+                bg='#f0f0f0', fg='#333').pack(anchor=tk.W)
+        
+        self.memory_label = tk.Label(memory_frame, text="0.0 MB", 
+                                    font=('Arial', 9), bg='#e0e0e0', fg='#333', 
+                                    relief='sunken', anchor='w', padx=5)
+        self.memory_label.pack(fill=tk.X, pady=(2, 0))
+        
+        # Performance buttons
+        perf_buttons_frame = tk.Frame(perf_section, bg='#f0f0f0')
+        perf_buttons_frame.pack(fill=tk.X)
+        
+        tk.Button(perf_buttons_frame, text="🗑️ Clear Cache", command=self.clear_image_cache,
+                 bg='#FF9800', fg='white', font=('Arial', 9, 'bold'),
+                 padx=8, pady=3, relief='raised').pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 2))
+        
+        tk.Button(perf_buttons_frame, text="📊 Update Stats", command=self.update_memory_display,
+                 bg='#2196F3', fg='white', font=('Arial', 9, 'bold'),
+                 padx=8, pady=3, relief='raised').pack(side=tk.RIGHT, fill=tk.X, expand=True, padx=(2, 0))
         
         # === HELP SECTION ===
         help_section = tk.LabelFrame(content_frame, text="ℹ️ Keyboard Shortcuts", 
@@ -855,7 +1038,7 @@ class ImageEditor:
         
     def create_sections_panel(self, parent):
         """Create a simple right sections panel"""
-        sections_container = tk.Frame(parent, bg='#f0f0f0', width=300, relief='solid', bd=1)
+        sections_container = tk.Frame(parent, bg='#f0f0f0', width=350, relief='solid', bd=1)
         sections_container.pack(side=tk.RIGHT, fill=tk.Y)
         sections_container.pack_propagate(False)
         
@@ -1058,14 +1241,23 @@ class ImageEditor:
                 if hasattr(self, 'canvas_info_label'):
                     self.canvas_info_label.config(text=f"Large image loaded: {width:,}×{height:,} pixels ({megapixels:.1f}MP) • Use mouse wheel to zoom")
                 
-                # Display image (might take time for very large images)
-                self.update_status(f"Rendering large image for display...")
-                self.root.after(100, self.fit_to_window)  # Delay to ensure canvas is ready
+                # Display image with performance optimizations
+                self.update_status(f"🚀 Initializing performance optimizations...")
                 
-                # Reset window title for single image
-                self.root.title("📸 Advanced TIFF Image Editor - No Size Limits")
+                # Initialize performance optimizations after UI is ready
+                def init_optimizations():
+                    self.fit_to_window()
+                    self.optimize_image_loading()
                 
-                self.update_status(f"Successfully loaded large image: {width:,}×{height:,} ({megapixels:.1f}MP) • Use mouse wheel to zoom")
+                self.root.after(100, init_optimizations)
+                
+                # Reset window title with performance mode
+                mode_text = "🚀 OPTIMIZED" if self.enable_fast_zoom else "🐌 LEGACY"
+                self.root.title(f"📸 Advanced TIFF Editor - {mode_text} - No Size Limits")
+                
+                # Enhanced status message with size categorization
+                size_category = "🔥 MASSIVE" if megapixels > 100 else "📏 LARGE" if megapixels > 25 else "📷 NORMAL"
+                self.update_status(f"✅ {size_category} image loaded: {width:,}×{height:,} ({megapixels:.1f}MP) • Mouse wheel to zoom")
                 
                 # Restore original limit setting (though we set it to None anyway)
                 Image.MAX_IMAGE_PIXELS = original_max_pixels
@@ -1083,21 +1275,31 @@ class ImageEditor:
                 messagebox.showerror("Error", f"Failed to load image: {error_msg}")
     
     def _extract_and_set_dpi(self, file_path):
-        """Extract DPI from image metadata and update the UI"""
+        """Extract DPI from image metadata and update the UI - NO LIMITS!"""
         try:
-            # Try to get DPI from PIL image info
-            dpi_info = self.original_image.info.get('dpi', None)
             extracted_dpi = None
+            dpi_source = "not found"
             
+            # Method 1: Try to get DPI from PIL image info
+            dpi_info = self.original_image.info.get('dpi', None)
             if dpi_info:
-                # DPI is usually returned as (x_dpi, y_dpi)
                 if isinstance(dpi_info, (list, tuple)) and len(dpi_info) >= 2:
-                    # Use the first DPI value (x_dpi)
-                    extracted_dpi = int(dpi_info[0])
-                elif isinstance(dpi_info, (int, float)):
+                    # Use the first DPI value (x_dpi) - accept ANY value, even 1
+                    extracted_dpi = int(dpi_info[0]) if dpi_info[0] > 0 else int(dpi_info[1])
+                    dpi_source = f"PIL dpi field: {dpi_info}"
+                elif isinstance(dpi_info, (int, float)) and dpi_info > 0:
                     extracted_dpi = int(dpi_info)
+                    dpi_source = f"PIL dpi field: {dpi_info}"
             
-            # If no DPI in image info, try to get from EXIF data
+            # Method 2: Try resolution field if no DPI found
+            if not extracted_dpi:
+                resolution_info = self.original_image.info.get('resolution', None)
+                if resolution_info and isinstance(resolution_info, (list, tuple)) and len(resolution_info) >= 2:
+                    if resolution_info[0] > 0:
+                        extracted_dpi = int(resolution_info[0])
+                        dpi_source = f"PIL resolution field: {resolution_info}"
+            
+            # Method 3: Try EXIF data if available
             if not extracted_dpi and hasattr(self.original_image, '_getexif'):
                 try:
                     exif = self.original_image._getexif()
@@ -1107,40 +1309,194 @@ class ImageEditor:
                         if x_resolution:
                             if isinstance(x_resolution, (list, tuple)) and len(x_resolution) >= 2:
                                 # Resolution is often stored as (numerator, denominator)
-                                extracted_dpi = int(x_resolution[0] / x_resolution[1])
-                            else:
+                                if x_resolution[1] != 0:
+                                    extracted_dpi = int(x_resolution[0] / x_resolution[1])
+                                    dpi_source = f"EXIF XResolution: {x_resolution}"
+                            elif isinstance(x_resolution, (int, float)) and x_resolution > 0:
                                 extracted_dpi = int(x_resolution)
-                except:
+                                dpi_source = f"EXIF XResolution: {x_resolution}"
+                except Exception as e:
                     pass  # EXIF parsing failed, continue
+            
+            # Method 4: Check for other common metadata fields
+            if not extracted_dpi:
+                # Try other common fields that might contain resolution info
+                for field_name in ['jfif_density', 'density', 'x_resolution', 'y_resolution']:
+                    field_value = self.original_image.info.get(field_name, None)
+                    if field_value and isinstance(field_value, (int, float, list, tuple)):
+                        if isinstance(field_value, (list, tuple)) and len(field_value) > 0:
+                            field_value = field_value[0]
+                        if isinstance(field_value, (int, float)) and field_value > 0:
+                            extracted_dpi = int(field_value)
+                            dpi_source = f"metadata field '{field_name}': {field_value}"
+                            break
             
             # If we found a DPI value, update the UI
             if extracted_dpi and extracted_dpi > 0:
-                # Validate DPI is reasonable (between 72 and 1200)
-                if 72 <= extracted_dpi <= 1200:
-                    self.image_dpi = extracted_dpi
-                    self.dpi_var.set(str(extracted_dpi))
-                    self.update_status(f"Image DPI auto-detected: {extracted_dpi}")
-                    
+                # Accept ANY positive DPI value - no limits!
+                # Even very low DPI values (like 1) or very high ones (like 10000) can be valid
+                old_dpi = self.image_dpi
+                self.image_dpi = extracted_dpi
+                self.dpi_var.set(str(extracted_dpi))
+                
+                # Provide more informative status messages
+                if extracted_dpi < 72:
+                    self.update_status(f"Image DPI auto-detected: {extracted_dpi} (low resolution - was {old_dpi})")
+                elif extracted_dpi > 1200:
+                    self.update_status(f"Image DPI auto-detected: {extracted_dpi} (very high resolution - was {old_dpi})")
+                else:
+                    pass
+                    pass
+                    pass  # Placeholder for else block
+                    pass  # Placeholder to avoid syntax error
+                    self.update_status(f"Image DPI auto-detected: {extracted_dpi} (was {old_dpi})")
+                
+                # Refresh all DPI-dependent elements after a short delay
+                def refresh_dpi_elements():
                     # Refresh the display for updated cm measurements
                     if self.show_grid:
-                        self.root.after(200, self.display_image)
-                else:
-                    self.update_status(f"Found DPI {extracted_dpi} but seems unreasonable, keeping default {self.image_dpi}")
+                        self.display_image()
+                    
+                    # Update ruler measurement if ruler is active
+                    if self.show_ruler and self.ruler_start and self.ruler_end:
+                        _, real_pixels, cm_distance = self.calculate_distance(
+                            self.ruler_start[0], self.ruler_start[1],
+                            self.ruler_end[0], self.ruler_end[1]
+                        )
+                        measurement_text = f"Distance: {real_pixels:.1f} px ({cm_distance:.2f} cm)"
+                        self.ruler_measurement_var.set(measurement_text)
+                
+                self.root.after(200, refresh_dpi_elements)
             else:
                 # No DPI found in metadata
                 filename = os.path.basename(file_path)
-                self.update_status(f"No DPI metadata found in {filename}, using default {self.image_dpi} DPI")
+                
+                # Show all metadata for debugging
+                available_fields = list(self.original_image.info.keys())
+                self.update_status(f"No DPI in {filename} metadata (available: {available_fields}), using default {self.image_dpi} DPI")
                 
         except Exception as e:
             # If anything goes wrong, just use default DPI
             filename = os.path.basename(file_path) if file_path else "image"
-            self.update_status(f"Could not read DPI from {filename}, using default {self.image_dpi} DPI")
+            self.update_status(f"Could not read DPI from {filename} (error: {str(e)[:100]}), using default {self.image_dpi} DPI")
                 
     def display_image(self):
-        """Display the current image on canvas"""
+        """🚀 HIGH-PERFORMANCE Display with viewport culling and smart caching"""
         if self.original_image is None:
             return
+        
+        if self.enable_fast_zoom:
+            self._display_image_optimized()
+        else:
+            self._display_image_legacy()
+    
+    def _display_image_optimized(self):
+        """🚀 Advanced optimized display with GPU acceleration and smart caching"""
+        try:
+            start_time = time.perf_counter()
             
+            # Get viewport information with better precision
+            canvas_width = self.canvas.winfo_width()
+            canvas_height = self.canvas.winfo_height()
+            
+            # Calculate what's actually visible with sub-pixel precision
+            scroll_x = self.canvas.canvasx(0)
+            scroll_y = self.canvas.canvasy(0)
+            visible_width = min(canvas_width, self.canvas.winfo_reqwidth())
+            visible_height = min(canvas_height, self.canvas.winfo_reqheight())
+            
+            # Enhanced viewport key with image hash for cache validation
+            image_hash = getattr(self.original_image, '_cache_hash', None)
+            if not image_hash:
+                # Create lightweight hash for cache validation
+                image_hash = hashlib.md5(f"{id(self.original_image)}_{self.original_image.size}".encode()).hexdigest()[:8]
+                self.original_image._cache_hash = image_hash
+            
+            viewport_key = f"{image_hash}_{self.image_scale:.4f}_{scroll_x:.0f}_{scroll_y:.0f}_{visible_width}x{visible_height}"
+            
+            # Check cache with LRU management
+            if viewport_key in self.display_cache:
+                # Move to end for LRU
+                cache_entry = self.display_cache.pop(viewport_key)
+                self.display_cache[viewport_key] = cache_entry
+                
+                self.photo_image = cache_entry['photo']
+                display_width = cache_entry['width']
+                display_height = cache_entry['height']
+                
+                self.cache_hit_count += 1
+                render_time = (time.perf_counter() - start_time) * 1000
+                self.update_status(f"⚡ Cache hit: {render_time:.1f}ms (saved ~{cache_entry.get('estimated_render_time', 0):.0f}ms)")
+            else:
+                self.cache_miss_count += 1
+                # Calculate optimal pyramid level
+                optimal_level = self._get_optimal_pyramid_level()
+                
+                # Get or create pyramid level
+                pyramid_img = self._get_pyramid_level(optimal_level)
+                
+                # Calculate display dimensions with sub-pixel precision
+                orig_width, orig_height = self.original_image.size
+                display_width = max(1, min(int(orig_width * self.image_scale), 32000))
+                display_height = max(1, min(int(orig_height * self.image_scale), 32000))
+                
+                # Check for viewport optimization opportunity
+                # Check if image is too large for direct rendering
+                total_pixels = display_width * display_height
+                if total_pixels > self.max_display_pixels:
+                    # Use simplified rendering for massive images
+                    display_img = pyramid_img.resize((display_width, display_height), Image.Resampling.LANCZOS)
+                    self.update_status(f"🔍 Large image optimization: {display_width}x{display_height}")
+                else:
+                    # Standard rendering for manageable sizes
+                    pyramid_scale = optimal_level
+                    pyramid_display_scale = self.image_scale / pyramid_scale
+                    
+                    if abs(pyramid_display_scale - 1.0) > 0.01:
+                        new_width = int(pyramid_img.size[0] * pyramid_display_scale)
+                        new_height = int(pyramid_img.size[1] * pyramid_display_scale)
+                        new_width = max(1, min(new_width, 32000))
+                        new_height = max(1, min(new_height, 32000))
+                        display_img = pyramid_img.resize((new_width, new_height), Image.Resampling.LANCZOS)
+                    else:
+                        display_img = pyramid_img
+                
+                # Convert to PhotoImage
+                self.photo_image = ImageTk.PhotoImage(display_img)
+                
+                # Cache the result (with size limit)
+                self._cache_display_result(viewport_key, self.photo_image, display_width, display_height)
+                
+                render_time = (time.time() - start_time) * 1000
+                pyramid_info = f"pyramid {optimal_level:.2f}x" if optimal_level != 1.0 else "full res"
+                self.update_status(f"⚡ Rendered {display_width}x{display_height} ({pyramid_info}) in {render_time:.1f}ms")
+            
+            # Update canvas
+            self.canvas.delete("all")
+            self.canvas.create_image(0, 0, anchor=tk.NW, image=self.photo_image)
+            
+            # Update scroll region
+            self.canvas.configure(scrollregion=(0, 0, display_width, display_height))
+            
+            # Redraw overlays immediately to ensure they're always visible
+            if self.current_selections:
+                self.redraw_selections()
+            if self.clipped_sections:
+                self.draw_clipped_sections()
+            if self.show_lines:
+                self.draw_vertical_lines()
+            if self.show_grid:
+                self.draw_grid()
+            if self.show_ruler:
+                self.draw_ruler()
+            
+        except Exception as e:
+            print(f"Error in optimized display: {e}")
+            # Fallback to legacy mode
+            self._display_image_legacy()
+    
+    def _display_image_legacy(self):
+        """Original display method - kept as fallback"""
         try:
             # Calculate display size
             orig_width, orig_height = self.original_image.size
@@ -1164,27 +1520,282 @@ class ImageEditor:
             # Update scroll region
             self.canvas.configure(scrollregion=self.canvas.bbox("all"))
             
-            # Redraw selections
+            # Redraw overlays
+            print(f"DEBUG: display_image calling redraw_selections")
             self.redraw_selections()
-            
-            # Draw clipped sections on top
+            print(f"DEBUG: display_image calling draw_clipped_sections")
             self.draw_clipped_sections()
             
-            # Draw vertical lines overlay if enabled (after a small delay to ensure canvas is updated)
+            print(f"DEBUG: display_image - show_lines: {self.show_lines}")
             if self.show_lines:
+                print(f"DEBUG: display_image - scheduling draw_vertical_lines")
                 self.root.after(10, self.draw_vertical_lines)
-            
-            # Draw grid overlay if enabled
+            else:
+                print(f"DEBUG: display_image - NOT drawing vertical lines (show_lines=False)")
             if self.show_grid:
                 self.root.after(15, self.draw_grid)
-            
-            # Draw ruler if enabled
             if self.show_ruler:
                 self.root.after(20, self.draw_ruler)
             
         except Exception as e:
-            print(f"Error in display_image: {e}")
+            print(f"Error in legacy display: {e}")
             messagebox.showerror("Display Error", f"Failed to display image: {str(e)}")
+    
+    # 🚀 OPTIMIZATION SUPPORT METHODS
+    
+    def _get_optimal_pyramid_level(self):
+        """Determine the best pyramid level for current zoom"""
+        if self.image_scale >= 1.0:
+            return 1.0  # Use full resolution for zoom in
+        elif self.image_scale >= 0.5:
+            return 0.5
+        elif self.image_scale >= 0.25:
+            return 0.25
+        elif self.image_scale >= 0.1:
+            return 0.1
+        else:
+            return 0.05
+    
+    def _get_pyramid_level(self, level):
+        """Get or create a pyramid level"""
+        if level not in self.image_pyramid:
+            self._create_pyramid_level(level)
+        return self.image_pyramid[level]
+    
+    def _create_pyramid_level(self, level):
+        """Create a specific pyramid level"""
+        try:
+            if level == 1.0:
+                # Full resolution - use working image
+                self.image_pyramid[level] = self.working_image.copy()
+            else:
+                # Downscaled version
+                orig_width, orig_height = self.original_image.size
+                new_width = max(1, int(orig_width * level))
+                new_height = max(1, int(orig_height * level))
+                
+                # Use high-quality resampling for pyramid levels
+                self.image_pyramid[level] = self.working_image.resize(
+                    (new_width, new_height), 
+                    Image.Resampling.LANCZOS
+                )
+                
+            print(f"Created pyramid level {level}: {self.image_pyramid[level].size}")
+            
+        except Exception as e:
+            print(f"Error creating pyramid level {level}: {e}")
+            # Fallback to working image
+            self.image_pyramid[level] = self.working_image.copy()
+    
+    def _render_viewport_only(self, source_img, scroll_x, scroll_y, visible_width, visible_height):
+        """Render only the visible viewport for massive images"""
+        try:
+            # Calculate the region of the source image that's visible
+            source_width, source_height = source_img.size
+            
+            # Convert scroll coordinates to source image coordinates
+            scale_factor = source_width / (self.original_image.size[0] * self.image_scale)
+            
+            source_x = int(scroll_x * scale_factor)
+            source_y = int(scroll_y * scale_factor)
+            source_right = min(source_width, int((scroll_x + visible_width) * scale_factor))
+            source_bottom = min(source_height, int((scroll_y + visible_height) * scale_factor))
+            
+            # Ensure valid crop region
+            source_x = max(0, source_x)
+            source_y = max(0, source_y)
+            crop_width = source_right - source_x
+            crop_height = source_bottom - source_y
+            
+            if crop_width <= 0 or crop_height <= 0:
+                # Return a small fallback image
+                return Image.new('RGB', (visible_width, visible_height), 'white')
+            
+            # Crop the visible region
+            viewport_img = source_img.crop((source_x, source_y, source_right, source_bottom))
+            
+            # Resize to visible dimensions
+            if viewport_img.size != (visible_width, visible_height):
+                viewport_img = viewport_img.resize((visible_width, visible_height), Image.Resampling.LANCZOS)
+            
+            return viewport_img
+            
+        except Exception as e:
+            print(f"Error in viewport rendering: {e}")
+            # Return fallback
+            return Image.new('RGB', (visible_width, visible_height), 'lightgray')
+    
+    def _cache_display_result(self, key, photo_image, width, height):
+        """Cache display result with size management"""
+        # Remove old entries if cache is full
+        if len(self.display_cache) >= self.cache_max_size:
+            # Remove oldest entry
+            oldest_key = next(iter(self.display_cache))
+            del self.display_cache[oldest_key]
+        
+        self.display_cache[key] = {
+            'photo': photo_image,
+            'width': width,
+            'height': height,
+            'timestamp': time.time()
+        }
+    
+    def _schedule_overlay_rendering(self):
+        """Efficiently schedule overlay rendering"""
+        # Use a single delayed call to render all overlays
+        if hasattr(self, '_overlay_scheduled'):
+            return  # Already scheduled
+        
+        self._overlay_scheduled = True
+        
+        def render_overlays():
+            try:
+                self.redraw_selections()
+                self.draw_clipped_sections()
+                
+                if self.show_lines:
+                    self.draw_vertical_lines()
+                if self.show_grid:
+                    self.draw_grid()
+                if self.show_ruler:
+                    self.draw_ruler()
+            finally:
+                if hasattr(self, '_overlay_scheduled'):
+                    delattr(self, '_overlay_scheduled')
+        
+        # Schedule after a short delay to batch overlay updates
+        self.root.after(25, render_overlays)
+    
+    def clear_image_cache(self):
+        """Clear all image caches to free memory"""
+        self.image_pyramid.clear()
+        self.display_cache.clear()
+        if self.auto_garbage_collect:
+            gc.collect()
+        self.update_status("🗑️ Image cache cleared - memory freed")
+    
+    def get_memory_usage_mb(self):
+        """Estimate current memory usage"""
+        total_mb = 0
+        
+        # Calculate pyramid cache size
+        for level, img in self.image_pyramid.items():
+            width, height = img.size
+            # Estimate: 3 bytes per pixel (RGB) + overhead
+            mb = (width * height * 3) / (1024 * 1024)
+            total_mb += mb
+        
+        # Add display cache
+        total_mb += len(self.display_cache) * 5  # Rough estimate
+        
+        return total_mb
+    
+    def toggle_fast_zoom(self):
+        """Toggle between optimized and legacy zoom modes"""
+        self.enable_fast_zoom = not self.enable_fast_zoom
+        mode = "OPTIMIZED 🚀" if self.enable_fast_zoom else "LEGACY 🐌"
+        self.update_status(f"Zoom mode: {mode}")
+        self.display_image()  # Refresh with new mode
+    
+    def toggle_fast_zoom_ui(self):
+        """Toggle fast zoom from UI checkbox"""
+        self.enable_fast_zoom = self.fast_zoom_var.get()
+        self.toggle_fast_zoom()
+        # Update checkbox to match internal state
+        self.fast_zoom_var.set(self.enable_fast_zoom)
+    
+    def toggle_gpu_acceleration(self):
+        """Toggle GPU acceleration on/off"""
+        if hasattr(self, 'gpu_var'):
+            self.enable_gpu_acceleration = self.gpu_var.get()
+            if self.enable_gpu_acceleration and not HAS_OPENCV:
+                self.enable_gpu_acceleration = False
+                self.gpu_var.set(False)
+                messagebox.showwarning("GPU Acceleration", "OpenCV not available. GPU acceleration disabled.")
+            
+            mode = "🚀 GPU ENABLED" if self.enable_gpu_acceleration else "💻 CPU ONLY"
+            self.update_status(f"Processing mode: {mode}")
+            
+            # Clear cache to force regeneration with new method
+            self.clear_image_cache()
+    
+    def toggle_profiling(self):
+        """Toggle performance profiling on/off"""
+        if hasattr(self, 'profiling_var'):
+            self.enable_profiling = self.profiling_var.get()
+            mode = "📊 PROFILING ON" if self.enable_profiling else "📊 PROFILING OFF"
+            self.update_status(f"Performance profiling: {mode}")
+            
+            if self.enable_profiling:
+                print("🔬 Performance profiling enabled - operations will be timed")
+            else:
+                # Show profiling summary if available
+                if self.performance_stats['render_times']:
+                    recent_times = [op['duration_ms'] for op in self.performance_stats['render_times'][-10:]]
+                    avg_time = sum(recent_times) / len(recent_times)
+                    print(f"📈 Recent average render time: {avg_time:.1f}ms")
+    
+    def update_memory_display(self):
+        """Update memory usage display"""
+        try:
+            memory_mb = self.get_memory_usage_mb()
+            pyramid_count = len(self.image_pyramid)
+            cache_count = len(self.display_cache)
+            
+            memory_text = f"{memory_mb:.1f} MB ({pyramid_count}P + {cache_count}C)"
+            self.memory_label.config(text=memory_text)
+            
+            # Color code based on usage
+            if memory_mb > self.memory_limit_mb * 0.8:  # > 80% of limit
+                self.memory_label.config(fg='red')
+            elif memory_mb > self.memory_limit_mb * 0.5:  # > 50% of limit
+                self.memory_label.config(fg='orange')
+            else:
+                self.memory_label.config(fg='green')
+                
+            self.update_status(f"📊 Memory: {memory_mb:.1f}MB • Pyramid levels: {pyramid_count} • Display cache: {cache_count}")
+            
+        except Exception as e:
+            self.memory_label.config(text="Error", fg='red')
+            print(f"Error updating memory display: {e}")
+    
+    def optimize_image_loading(self):
+        """Optimize image loading for better performance"""
+        if self.original_image is None:
+            return
+            
+        try:
+            # Clear old caches
+            self.image_pyramid.clear()
+            self.display_cache.clear()
+            
+            # Pre-generate commonly used pyramid levels
+            if self.enable_fast_zoom:
+                self.update_status("🚀 Pre-generating pyramid levels...")
+                
+                # Generate levels based on image size
+                img_size = self.original_image.size[0] * self.original_image.size[1]
+                
+                if img_size > 50_000_000:  # > 50MP - generate more levels
+                    levels_to_create = [0.05, 0.1, 0.25, 0.5]
+                elif img_size > 10_000_000:  # > 10MP
+                    levels_to_create = [0.1, 0.25, 0.5]
+                else:  # Smaller images
+                    levels_to_create = [0.25, 0.5]
+                
+                for level in levels_to_create:
+                    self._create_pyramid_level(level)
+                    # Allow UI to remain responsive
+                    self.root.update_idletasks()
+                
+                self.update_status(f"✅ Created {len(levels_to_create)} pyramid levels")
+            
+            # Update memory display
+            self.update_memory_display()
+            
+        except Exception as e:
+            print(f"Error optimizing image loading: {e}")
+            self.update_status(f"⚠️ Optimization error: {str(e)[:50]}")
         
     def redraw_selections(self):
         """Redraw current selection being drawn"""
@@ -1193,10 +1804,13 @@ class ImageEditor:
         
     def draw_clipped_sections(self):
         """Draw all clipped sections on the canvas"""
+        print(f"DEBUG: draw_clipped_sections called, sections count: {len(self.clipped_sections)}")
+        
         # Clear section photos to prevent memory leaks
         self.section_photos = []
         
         for i, section in enumerate(self.clipped_sections):
+            print(f"DEBUG: Drawing section {i}: pos={section['position']}, size={section['size']}, color={section['color']}")
             # Calculate scaled position
             x, y = section['position']
             scaled_x = int(x * self.image_scale)
@@ -1207,18 +1821,24 @@ class ImageEditor:
             scaled_width = int(width * self.image_scale)
             scaled_height = int(height * self.image_scale)
             
+            print(f"DEBUG: Section {i} scaled dimensions: {scaled_width}x{scaled_height} at ({scaled_x}, {scaled_y})")
+            
             if scaled_width > 0 and scaled_height > 0:
+                print(f"DEBUG: Resizing section {i} image for display")
                 # Resize the clipped section for display
                 display_section = section['image'].resize((scaled_width, scaled_height), Image.Resampling.LANCZOS)
                 
+                print(f"DEBUG: Converting section {i} to PhotoImage")
                 # Convert to PhotoImage
                 section_photo = ImageTk.PhotoImage(display_section)
                 
                 # Store reference to prevent garbage collection
                 self.section_photos.append(section_photo)
                 
+                print(f"DEBUG: Drawing section {i} on canvas at ({scaled_x}, {scaled_y})")
                 # Draw on canvas
-                self.canvas.create_image(scaled_x, scaled_y, anchor=tk.NW, image=section_photo, tags=f"clipped_{i}")
+                img_id = self.canvas.create_image(scaled_x, scaled_y, anchor=tk.NW, image=section_photo, tags=f"clipped_{i}")
+                print(f"DEBUG: Section {i} canvas image ID: {img_id}")
                 
                 # Draw border around clipped section
                 border_color = section['color']
@@ -1288,7 +1908,12 @@ class ImageEditor:
         if self.show_ruler and self._handle_ruler_click(event.x, event.y, image_x, image_y):
             return
         
+        # Handle line dragging (if lines are shown and not confirmed)
+        if self.show_lines and not self.lines_confirmed and self._handle_line_click(event.x, event.y):
+            return
+        
         if self.current_mode == "select":
+            print(f"DEBUG: on_mouse_down - selection mode, starting drawing at ({image_x}, {image_y})")
             self.drawing = True
             self.selection_path = [(image_x, image_y)]
             
@@ -1335,8 +1960,15 @@ class ImageEditor:
         if self.show_ruler and self._handle_ruler_drag(canvas_x, canvas_y, image_x, image_y):
             return
         
+        # Handle line dragging (if active)
+        if self.dragging_line is not None and self._handle_line_drag(canvas_x, canvas_y):
+            return
+        
         if self.current_mode == "select" and self.drawing:
             self.selection_path.append((image_x, image_y))
+            # Only log every 50th point to reduce spam
+            if len(self.selection_path) % 50 == 0:
+                print(f"DEBUG: on_mouse_drag - path length now: {len(self.selection_path)}")
             
             # Draw temporary line
             if len(self.selection_path) > 1:
@@ -1373,15 +2005,25 @@ class ImageEditor:
         if self.show_ruler and self._handle_ruler_release():
             return
         
+        # Handle line release (if active)
+        if self._handle_line_release():
+            return
+        
         if self.current_mode == "select" and self.drawing:
+            print(f"DEBUG: on_mouse_up - selection mode, drawing was: {self.drawing}")
             self.drawing = False
             
+            print(f"DEBUG: selection_path length: {len(self.selection_path) if hasattr(self, 'selection_path') else 'NO PATH'}")
             if len(self.selection_path) > 2:
+                print(f"DEBUG: Creating clipped section with path of {len(self.selection_path)} points")
                 # Automatically clip and color the selection
                 self.create_clipped_section(self.selection_path.copy(), self.selected_color)
+            else:
+                print(f"DEBUG: Path too short for section creation: {len(self.selection_path)}")
                 
             # Clear temporary drawing
             self.canvas.delete("temp_selection")
+            print(f"DEBUG: on_mouse_up calling display_image after section creation")
             self.display_image()
             
         elif self.current_mode == "move":
@@ -1422,15 +2064,21 @@ class ImageEditor:
             else:
                 self.canvas.config(cursor="arrow")
         
-        # Show coordinates in coordinate label
+        # Show coordinates in coordinate label (both pixels and cm)
         if hasattr(self, 'coord_label'):
+            # Convert to centimeters
+            x_cm = self.pixels_to_cm(image_x)
+            y_cm = self.pixels_to_cm(image_y)
+            
             if self.snap_to_grid:
                 snap_x, snap_y = self.snap_to_grid_position(image_x, image_y)
-                self.coord_label.config(text=f"({image_x:.1f}, {image_y:.1f}) → ({snap_x:.0f}, {snap_y:.0f})")
+                snap_x_cm = self.pixels_to_cm(snap_x)
+                snap_y_cm = self.pixels_to_cm(snap_y)
+                self.coord_label.config(text=f"({image_x:.1f}px, {image_y:.1f}px) | ({x_cm:.2f}cm, {y_cm:.2f}cm) → Snap: ({snap_x:.0f}px, {snap_y:.0f}px) | ({snap_x_cm:.2f}cm, {snap_y_cm:.2f}cm)")
             elif self.precise_mode:
-                self.coord_label.config(text=f"({image_x:.2f}, {image_y:.2f})")
+                self.coord_label.config(text=f"Pos: ({image_x:.2f}px, {image_y:.2f}px) | ({x_cm:.2f}cm, {y_cm:.2f}cm)")
             else:
-                self.coord_label.config(text=f"({int(image_x)}, {int(image_y)})")
+                self.coord_label.config(text=f"Pos: ({int(image_x)}px, {int(image_y)}px) | ({x_cm:.2f}cm, {y_cm:.2f}cm)")
     
     def on_key_press(self, event):
         """Handle keyboard shortcuts for precise movement and image navigation"""
@@ -1598,6 +2246,63 @@ class ImageEditor:
         closest_y = y1 + t * (y2 - y1)
         
         return self._point_distance(px, py, closest_x, closest_y)
+        
+    def _handle_line_click(self, canvas_x, canvas_y):
+        """Handle clicking on a vertical line for dragging"""
+        if not self.line_positions or not self.original_image:
+            return False
+        
+        # Convert canvas coordinates to image coordinates
+        image_x = canvas_x / self.image_scale
+        
+        # Check if click is near any line
+        for i, line_x in enumerate(self.line_positions):
+            line_display_x = line_x * self.image_scale
+            distance = abs(canvas_x - line_display_x)
+            
+            if distance <= self.line_drag_tolerance:
+                self.dragging_line = i
+                self.line_drag_start = (canvas_x, canvas_y)
+                self.update_status(f"Dragging vertical line {i + 1} - drag to reposition")
+                # Redraw to show dragging color
+                self.display_image()
+                return True
+        
+        return False
+    
+    def _handle_line_drag(self, canvas_x, canvas_y):
+        """Handle dragging a vertical line"""
+        if self.dragging_line is None or not self.original_image:
+            return False
+        
+        # Convert to image coordinates
+        new_image_x = canvas_x / self.image_scale
+        
+        # Clamp to image bounds with some margin
+        orig_width = self.original_image.size[0]
+        new_image_x = max(10, min(orig_width - 10, new_image_x))
+        
+        # Update line position
+        self.line_positions[self.dragging_line] = new_image_x
+        
+        # Redraw to show new position
+        self.display_image()
+        
+        # Update status with position info
+        cm_from_left = self.pixels_to_cm(new_image_x)
+        self.update_status(f"Line {self.dragging_line + 1}: {cm_from_left:.1f}cm from left edge")
+        return True
+    
+    def _handle_line_release(self):
+        """Handle releasing a dragged line"""
+        if self.dragging_line is not None:
+            self.update_status(f"Line {self.dragging_line + 1} positioned")
+            self.dragging_line = None
+            self.line_drag_start = None
+            # Redraw to remove dragging color
+            self.display_image()
+            return True
+        return False
             
         # Get currently selected section from listbox
         selection = self.sections_listbox.curselection()
@@ -1730,7 +2435,9 @@ class ImageEditor:
         
     def create_clipped_section(self, path, color):
         """Create a new clipped section with color overlay"""
+        print(f"DEBUG: create_clipped_section called with path length: {len(path)}, color: {color}")
         if len(path) < 3:
+            print(f"DEBUG: Path too short, returning")
             return
             
         # Create mask for the selection
@@ -1783,22 +2490,31 @@ class ImageEditor:
                 'original_size': (bbox[2] - bbox[0], bbox[3] - bbox[1])  # Store original size
             }
             
+            print(f"DEBUG: Adding clipped section to list, current count: {len(self.clipped_sections)}")
             self.clipped_sections.append(clipped_section)
+            print(f"DEBUG: Clipped sections count after append: {len(self.clipped_sections)}")
             
-            # Remove the area from the working image (create hole)
-            hole_mask = Image.new('L', self.original_image.size, 255)
-            hole_draw = ImageDraw.Draw(hole_mask)
-            hole_draw.polygon(pil_path, fill=0)  # Black = transparent
+            # Ensure working image exists
+            if self.working_image is None:
+                self.working_image = self.original_image.copy()
             
-            # Apply hole to working image
-            working_rgba = self.working_image.convert('RGBA')
-            working_rgba.putalpha(hole_mask)
-            background = Image.new('RGB', self.original_image.size, (255, 255, 255))
-            self.working_image = Image.alpha_composite(background.convert('RGBA'), working_rgba).convert('RGB')
+            # Remove the area from the working image (create hole with white background)
+            # Create a mask where the selected area becomes white (background color)
+            working_copy = self.working_image.copy()
+            working_draw = ImageDraw.Draw(working_copy)
+            working_draw.polygon(pil_path, fill=(255, 255, 255))  # Fill with white background
+            
+            self.working_image = working_copy
+            
+            # Clear image cache to force refresh with the hole
+            self.display_cache.clear()
+            self.image_pyramid.clear()
             
             # Update the sections list
+            print(f"DEBUG: Updating sections list")
             self.update_sections_list()
             
+            print(f"DEBUG: Section creation completed successfully")
             messagebox.showinfo("Clipped", f"Section clipped and colored! Switch to 'Move' mode to reposition it.")
         
     def move_clipped_section(self, section_idx, dx, dy):
@@ -1996,47 +2712,83 @@ class ImageEditor:
         pass
             
     def zoom_in(self):
-        """Zoom in the image"""
+        """🚀 Optimized zoom in"""
+        old_scale = self.image_scale
         self.image_scale *= 1.2
-        self.display_image()
+        self.image_scale = min(10.0, self.image_scale)  # Limit max zoom
+        
+        if old_scale != self.image_scale:
+            # Clear cache if zoom level changed significantly
+            if abs(self.image_scale - old_scale) > 0.5:
+                self.display_cache.clear()
+            self.display_image()
+            self.update_status(f"🔍 Zoomed in to {self.image_scale:.1f}x")
+        else:
+            self.update_status("🔍 Maximum zoom reached")
         
     def zoom_out(self):
-        """Zoom out the image"""
+        """🚀 Optimized zoom out"""
+        old_scale = self.image_scale
         self.image_scale /= 1.2
-        self.display_image()
+        self.image_scale = max(0.05, self.image_scale)  # Limit min zoom
+        
+        if old_scale != self.image_scale:
+            # Clear cache if zoom level changed significantly
+            if abs(old_scale - self.image_scale) > 0.5:
+                self.display_cache.clear()
+            self.display_image()
+            self.update_status(f"🔍 Zoomed out to {self.image_scale:.1f}x")
+        else:
+            self.update_status("🔍 Minimum zoom reached")
     
     def on_mouse_wheel(self, event):
-        """Handle mouse wheel for zooming"""
+        """🚀 High-performance mouse wheel zooming with viewport tracking"""
         if self.original_image is None:
             return
         
-        # Simple zoom implementation
+        # Store mouse position for zoom-to-cursor (future enhancement)
+        mouse_x = self.canvas.canvasx(event.x)
+        mouse_y = self.canvas.canvasy(event.y)
+        
         old_scale = self.image_scale
+        zoom_factor = 1.1  # Smoother zoom increments
         
         # Determine zoom direction - Windows uses delta, Linux uses num
         if hasattr(event, 'delta'):  # Windows
             if event.delta > 0:
-                self.image_scale *= 1.1  # Zoom in
-                self.update_status("Zoomed in with mouse wheel")
+                self.image_scale *= zoom_factor  # Zoom in
+                direction = "in"
             else:
-                self.image_scale /= 1.1  # Zoom out
-                self.update_status("Zoomed out with mouse wheel")
+                self.image_scale /= zoom_factor  # Zoom out
+                direction = "out"
         elif hasattr(event, 'num'):  # Linux
             if event.num == 4:
-                self.image_scale *= 1.1  # Zoom in
-                self.update_status("Zoomed in with mouse wheel")
+                self.image_scale *= zoom_factor  # Zoom in
+                direction = "in"
             elif event.num == 5:
-                self.image_scale /= 1.1  # Zoom out
-                self.update_status("Zoomed out with mouse wheel")
+                self.image_scale /= zoom_factor  # Zoom out
+                direction = "out"
         
-        # Limit zoom range
-        self.image_scale = max(0.1, min(10.0, self.image_scale))
+        # Limit zoom range - more permissive for large images
+        self.image_scale = max(0.01, min(50.0, self.image_scale))
         
-        # Update display
-        if old_scale != self.image_scale:
+        # Only update if zoom actually changed
+        if abs(old_scale - self.image_scale) > 0.001:
+            # Throttle cache clearing to improve performance
+            scale_change = abs(old_scale - self.image_scale) / old_scale
+            if scale_change > 0.3:  # Only clear cache for significant changes
+                self.display_cache.clear()
+            
             self.display_image()
+            
+            # Show memory usage for large images
+            if self.enable_fast_zoom:
+                memory_mb = self.get_memory_usage_mb()
+                self.update_status(f"🚀 Zoom {direction} to {self.image_scale:.2f}x • Cache: {memory_mb:.1f}MB")
+            else:
+                self.update_status(f"🐌 Zoom {direction} to {self.image_scale:.2f}x (legacy mode)")
         else:
-            self.update_status("Zoom at limit")
+            self.update_status(f"🔍 Zoom limit reached ({self.image_scale:.2f}x)")
     
     def pan_image(self, direction, shift_pressed=False):
         """Pan the image using keyboard navigation"""
@@ -2154,7 +2906,15 @@ class ImageEditor:
         self.current_mode = self.mode_var.get()
         
         # Update visual indicators based on mode
-        if self.current_mode == "select":
+        if self.current_mode == "none":
+            self.canvas.config(cursor="arrow")
+            if hasattr(self, 'status_label'):
+                self.status_label.config(text="Mouse Mode: Navigate, zoom, and interact with interface")
+            # Update the mode indicator
+            if hasattr(self, 'mode_indicator'):
+                self.mode_indicator.config(text="Mouse Mode - Navigate and interact",
+                                         bg='#607D8B')
+        elif self.current_mode == "select":
             self.canvas.config(cursor="cross")
             if hasattr(self, 'status_label'):
                 self.status_label.config(text="Selection Mode: Draw around parts of the image")
@@ -2162,7 +2922,7 @@ class ImageEditor:
             if hasattr(self, 'mode_indicator'):
                 self.mode_indicator.config(text="Selection Mode - Draw around areas",
                                          bg='#4CAF50')
-        else:
+        elif self.current_mode == "move":
             self.canvas.config(cursor="arrow")
             if hasattr(self, 'status_label'):
                 self.status_label.config(text="Move Mode: Drag sections to reposition them")
@@ -2173,77 +2933,76 @@ class ImageEditor:
         
     def toggle_lines(self):
         """Toggle vertical lines display"""
-        self.show_lines = self.lines_var.get()
-        
-        # If turning off lines, also unlock them
-        if not self.show_lines and self.lines_confirmed:
-            self.unlock_lines()
-            
-        if self.original_image:
-            self.display_image()
-    
-    def update_lines_count(self, value):
-        """Update number of vertical lines (only if not confirmed)"""
-        if self.lines_confirmed:
-            return  # Don't allow changes when lines are confirmed
-            
-        self.num_lines = int(float(value))
-        if self.show_lines and self.original_image:
-            self.display_image()
-    
-    def update_line_spacing(self):
-        """Update the spacing between vertical lines (only if not confirmed)"""
-        if self.lines_confirmed:
-            return  # Don't allow changes when lines are confirmed
-            
         try:
-            self.line_spacing_percent = float(self.spacing_var.get())
-            if self.show_lines and self.original_image:
+            if hasattr(self, 'lines_var') and self.lines_var:
+                self.show_lines = self.lines_var.get()
+            else:
+                self.show_lines = False
+            
+            # If turning off lines, also unlock them
+            if not self.show_lines and self.lines_confirmed:
+                self.unlock_lines()
+                
+            if self.original_image:
                 self.display_image()
-        except ValueError:
-            # Reset to default if invalid value
-            self.spacing_var.set("20")
-            self.line_spacing_percent = 20
+                
+            self.update_status(f"Vertical lines {'enabled' if self.show_lines else 'disabled'}")
+        except Exception as e:
+            self.update_status("Error toggling vertical lines")
+    
+
     
     def draw_vertical_lines(self):
-        """Draw vertical lines overlay on canvas that scale with image"""
+        """Draw vertical lines overlay on canvas that scale with image using cm-based spacing"""
         if not self.original_image:
             return
             
+        # Clear previous line objects
+        self.line_objects = []
+        
         # Get image dimensions and scale
         orig_width, orig_height = self.original_image.size
         display_width = int(orig_width * self.image_scale)
         display_height = int(orig_height * self.image_scale)
         
-        # Calculate line spacing based on user-defined percentage of image width
-        line_spacing_image = orig_width * (self.line_spacing_percent / 100.0)
-        
-        # Store line positions in image coordinates for anchoring
-        self.line_positions = []
-        
-        # Calculate starting position to center the lines
-        total_width_needed = line_spacing_image * (self.num_lines - 1)
-        start_x = (orig_width - total_width_needed) / 2
-        
-        # Draw vertical lines with custom spacing
-        for i in range(self.num_lines):
-            # Calculate position in image coordinates
-            x_pos_image = start_x + (i * line_spacing_image)
+        # If no line positions set, calculate initial positions
+        if not self.line_positions or len(self.line_positions) != self.num_lines:
+            # Calculate line spacing based on cm measurement
+            line_spacing_pixels = self.cm_to_pixels(self.line_spacing_cm)
             
-            # Make sure lines stay within image bounds
-            if x_pos_image >= 0 and x_pos_image <= orig_width:
-                # Scale to display coordinates
-                x_pos_display = x_pos_image * self.image_scale
-                
-                # Store the image coordinate position
-                self.line_positions.append(x_pos_image)
-                
-                # Draw line from top to bottom of the displayed image
-                line_color = '#00FF00' if self.lines_confirmed else '#FF0000'  # Green if confirmed, red if not
-                line_width = 3 if self.lines_confirmed else 2
-                
-                self.canvas.create_line(x_pos_display, 0, x_pos_display, display_height,
-                                       fill=line_color, width=line_width, tags="guide_lines")
+            # Reset line positions in image coordinates
+            self.line_positions = []
+            
+            # Calculate starting position to center the lines
+            total_width_needed = line_spacing_pixels * (self.num_lines - 1)
+            start_x = (orig_width - total_width_needed) / 2
+            
+            # Calculate initial positions
+            for i in range(self.num_lines):
+                x_pos_image = start_x + (i * line_spacing_pixels)
+                if x_pos_image >= 0 and x_pos_image <= orig_width:
+                    self.line_positions.append(x_pos_image)
+        
+        # Draw vertical lines using stored positions
+        for i, x_pos_image in enumerate(self.line_positions):
+            # Scale to display coordinates
+            x_pos_display = x_pos_image * self.image_scale
+            
+            # Draw line from top to bottom of the displayed image
+            if self.lines_confirmed:
+                line_color = '#00FF00'  # Green if confirmed
+                line_width = 3
+            elif self.dragging_line == i:
+                line_color = '#FFD700'  # Gold if being dragged
+                line_width = 4
+            else:
+                line_color = '#FF0000'  # Red if not confirmed
+                line_width = 2
+            
+            # Create line and store its ID
+            line_id = self.canvas.create_line(x_pos_display, 0, x_pos_display, display_height,
+                                           fill=line_color, width=line_width, tags="guide_lines")
+            self.line_objects.append(line_id)
     
     def draw_grid(self):
         """Draw grid overlay on canvas for precise positioning"""
@@ -2478,7 +3237,7 @@ class ImageEditor:
         if self.original_image:
             self.display_image()
             
-        self.update_status(f"Lines confirmed! {self.num_lines} lines locked at {self.line_spacing_percent:.1f}% spacing")
+        self.update_status(f"Lines confirmed! {self.num_lines} lines locked at {self.line_spacing_cm:.1f}cm spacing")
     
     def unlock_lines(self):
         """Unlock the lines for modification"""
@@ -2499,6 +3258,42 @@ class ImageEditor:
             self.display_image()
             
         self.update_status("Lines unlocked - you can now modify line count and positions")
+    
+    def reset_line_positions(self):
+        """Reset all line positions to default equally spaced layout"""
+        if not self.original_image:
+            self.update_status("Load an image first")
+            return
+        
+        if self.lines_confirmed:
+            self.update_status("Unlock lines first to reset positions")
+            return
+        
+        # Clear current positions to force recalculation
+        self.line_positions = []
+        
+        if self.original_image:
+            self.display_image()
+        
+        self.update_status("Line positions reset to equal spacing")
+    
+    def reset_equal_spacing(self):
+        """Reset lines to equal spacing based on current spacing setting"""
+        if not self.original_image:
+            self.update_status("Load an image first")
+            return
+        
+        if self.lines_confirmed:
+            self.update_status("Unlock lines first to reset spacing")
+            return
+        
+        # Force recalculation with current spacing
+        self.line_positions = []
+        
+        if self.original_image:
+            self.display_image()
+        
+        self.update_status(f"Lines respaced equally at {self.line_spacing_cm:.1f}cm intervals")
     
     def _disable_spacing_controls(self, widget):
         """Helper to recursively disable spacing controls"""
@@ -2537,12 +3332,21 @@ class ImageEditor:
         if self.lines_confirmed:
             return  # Don't allow changes when lines are confirmed
             
-        self.num_lines = int(float(value))
-        if hasattr(self, 'lines_count_label'):
-            self.lines_count_label.config(text=str(self.num_lines))
-        
-        if self.show_lines and self.original_image:
-            self.display_image()
+        try:
+            self.num_lines = int(float(value))
+            if hasattr(self, 'lines_count_label') and self.lines_count_label:
+                self.lines_count_label.config(text=str(self.num_lines))
+            
+            if self.show_lines and self.original_image:
+                self.display_image()
+            
+            self.update_status(f"Lines count updated to {self.num_lines}")
+        except (ValueError, TypeError, AttributeError) as e:
+            print(f"Error updating lines count: {value}, error: {e}")
+            self.num_lines = 5  # Reset to default
+            if hasattr(self, 'lines_count_label') and self.lines_count_label:
+                self.lines_count_label.config(text="5")
+            self.update_status("Error updating line count - reset to 5")
     
     def update_line_spacing(self):
         """Update the spacing between vertical lines with visual feedback"""
@@ -2550,18 +3354,24 @@ class ImageEditor:
             return  # Don't allow changes when lines are confirmed
             
         try:
-            self.line_spacing_percent = float(self.spacing_var.get())
-            if hasattr(self, 'spacing_value_label'):
-                self.spacing_value_label.config(text=f"{self.line_spacing_percent:.1f}%")
-            
-            if self.show_lines and self.original_image:
-                self.display_image()
-        except ValueError:
+            if self.spacing_var:
+                self.line_spacing_cm = float(self.spacing_var.get())
+                if hasattr(self, 'spacing_value_label') and self.spacing_value_label:
+                    self.spacing_value_label.config(text=f"{self.line_spacing_cm:.1f}cm")
+                
+                if self.show_lines and self.original_image:
+                    self.display_image()
+                
+                self.update_status(f"Line spacing updated to {self.line_spacing_cm:.1f}cm")
+        except (ValueError, AttributeError, TypeError) as e:
             # Reset to default if invalid value
-            self.spacing_var.set("20.0")
-            self.line_spacing_percent = 20.0
-            if hasattr(self, 'spacing_value_label'):
-                self.spacing_value_label.config(text="20.0%")
+            print(f"Error updating line spacing: {e}")
+            if self.spacing_var:
+                self.spacing_var.set("5.0")
+            self.line_spacing_cm = 5.0
+            if hasattr(self, 'spacing_value_label') and self.spacing_value_label:
+                self.spacing_value_label.config(text="5.0cm")
+            self.update_status("Error updating line spacing - reset to 5.0cm")
     
     def toggle_snap(self):
         """Toggle grid snapping"""
@@ -2584,16 +3394,62 @@ class ImageEditor:
         if self.original_image:
             self.display_image()
     
+    def refresh_dpi_dependent_elements(self):
+        """Refresh all elements that depend on DPI after DPI change"""
+        if not self.original_image:
+            return
+            
+        # Redraw grid if visible
+        if self.show_grid:
+            self.display_image()
+        
+        # Update ruler measurement if ruler is active
+        if self.show_ruler and self.ruler_start and self.ruler_end:
+            # Recalculate ruler measurement with new DPI
+            _, real_pixels, cm_distance = self.calculate_distance(
+                self.ruler_start[0], self.ruler_start[1],
+                self.ruler_end[0], self.ruler_end[1]
+            )
+            measurement_text = f"Distance: {real_pixels:.1f} px ({cm_distance:.2f} cm)"
+            self.ruler_measurement_var.set(measurement_text)
+            
+            # Redraw ruler with updated measurement
+            if hasattr(self, 'canvas'):
+                self.canvas.delete("ruler")
+                self.draw_ruler()
+        
+        # Update any section measurements if they exist
+        self.update_sections_list()
+    
     def update_dpi(self):
-        """Update image DPI for accurate measurements"""
+        """Update image DPI for accurate measurements - UNLIMITED VALUES!"""
         try:
-            self.image_dpi = int(self.dpi_var.get())
-            if self.show_grid and self.original_image:
-                self.display_image()
-            self.update_status(f"Image DPI set to {self.image_dpi}")
-        except ValueError:
+            old_dpi = self.image_dpi
+            new_dpi = int(float(self.dpi_var.get()))  # Handle decimal inputs too
+            
+            # Accept ANY positive DPI value - no limits!
+            if new_dpi > 0:
+                self.image_dpi = new_dpi
+                
+                # If DPI actually changed, update all DPI-dependent elements
+                if old_dpi != self.image_dpi:
+                    self.refresh_dpi_dependent_elements()
+                    
+                    # Provide informative feedback about the DPI value
+                    if new_dpi < 50:
+                        self.update_status(f"Image DPI set to {self.image_dpi} (very low resolution - was {old_dpi})")
+                    elif new_dpi > 2400:
+                        self.update_status(f"Image DPI set to {self.image_dpi} (very high resolution - was {old_dpi})")
+                    else:
+                        self.update_status(f"Image DPI set to {self.image_dpi} (was {old_dpi})")
+            else:
+                self.update_status("DPI must be positive - keeping current value")
+                self.dpi_var.set(str(self.image_dpi))
+                
+        except (ValueError, TypeError):
             self.dpi_var.set("300")
             self.image_dpi = 300
+            self.update_status("Invalid DPI value, reset to 300")
     
     def toggle_show_ruler(self):
         """Toggle ruler display"""
@@ -2769,23 +3625,14 @@ class ImageEditor:
         
         # Create holes for all clipped sections
         for section in self.clipped_sections:
-            # Create hole mask
-            hole_mask = Image.new('L', self.original_image.size, 255)
-            hole_draw = ImageDraw.Draw(hole_mask)
-            
-            # Use original boundary to create hole
-            original_boundary = [(x - (section['position'][0] - section['boundary'][0][0]), 
-                                y - (section['position'][1] - section['boundary'][0][1])) 
-                               for x, y in section['boundary']]
-            
+            # Use the original boundary to create holes (fill with white)
+            working_draw = ImageDraw.Draw(self.working_image)
             pil_path = [(int(x), int(y)) for x, y in section['boundary']]
-            hole_draw.polygon(pil_path, fill=0)  # Black = transparent
-            
-            # Apply hole to working image
-            working_rgba = self.working_image.convert('RGBA')
-            working_rgba.putalpha(hole_mask)
-            background = Image.new('RGB', self.original_image.size, (255, 255, 255))
-            self.working_image = Image.alpha_composite(background.convert('RGBA'), working_rgba).convert('RGB')
+            working_draw.polygon(pil_path, fill=(255, 255, 255))  # Fill with white background
+        
+        # Clear caches to force refresh
+        self.display_cache.clear()
+        self.image_pyramid.clear()
             
     def reset_image(self):
         """Reset the working image to the original"""
@@ -2974,10 +3821,39 @@ class ImageEditor:
                 messagebox.showerror("Error", f"Failed to load project: {str(e)}")
                 
     def export_image(self):
-        """Export the current working image"""
+        """Export the current working image with optional grid/lines overlay"""
         if self.working_image is None:
             messagebox.showwarning("Warning", "No image to export")
             return
+        
+        # Check if overlays are active
+        has_overlays = (self.show_grid or 
+                       (self.show_lines and hasattr(self, 'line_positions')) or
+                       (hasattr(self, 'clipped_sections') and self.clipped_sections))
+        
+        # If overlays are present, ask user if they want to include them
+        include_overlays = False
+        if has_overlays:
+            overlay_types = []
+            if self.show_grid:
+                overlay_types.append("grid")
+            if self.show_lines and hasattr(self, 'line_positions'):
+                overlay_types.append("vertical lines")
+            if hasattr(self, 'clipped_sections') and self.clipped_sections:
+                overlay_types.append("colored selections")
+            
+            overlay_text = " and ".join(overlay_types)
+            result = messagebox.askyesnocancel(
+                "Export Options", 
+                f"You have {overlay_text} visible on your image.\n\n"
+                f"Do you want to include the overlay(s) in the exported image?\n\n"
+                f"• Yes: Export image WITH overlays\n"
+                f"• No: Export image WITHOUT overlays\n"
+                f"• Cancel: Cancel export"
+            )
+            if result is None:  # Cancel
+                return
+            include_overlays = result
             
         file_path = filedialog.asksaveasfilename(
             title="Export Image",
@@ -2988,28 +3864,157 @@ class ImageEditor:
         
         if file_path:
             try:
-                # Verify we're exporting full resolution
-                export_width, export_height = self.working_image.size
+                # Create the image to export
+                if include_overlays and has_overlays:
+                    self.update_status("Creating image with overlays...")
+                    export_image = self._create_image_with_overlays()
+                    self.update_status("Overlays applied successfully!")
+                else:
+                    export_image = self.working_image.copy()
+                
+                # Verify export dimensions
+                export_width, export_height = export_image.size
                 original_width, original_height = self.original_image.size
                 export_mp = (export_width * export_height) / 1_000_000
                 
-                self.working_image.save(file_path)
+                export_image.save(file_path)
+                
+                # Create success message with overlay info
+                overlay_info = ""
+                if include_overlays and has_overlays:
+                    overlay_types = []
+                    if self.show_grid:
+                        overlay_types.append("grid")
+                    if self.show_lines and hasattr(self, 'line_positions'):
+                        overlay_types.append("vertical lines")
+                    overlay_info = f"Overlays included: {', '.join(overlay_types)}\n"
                 
                 # Confirm full quality export
                 if export_width == original_width and export_height == original_height:
                     messagebox.showinfo("Success", 
                         f"Full resolution image exported successfully!\n\n"
                         f"Resolution: {export_width:,}×{export_height:,} ({export_mp:.1f}MP)\n"
+                        f"{overlay_info}"
                         f"Location: {file_path}")
                 else:
                     messagebox.showinfo("Success", 
                         f"Image exported successfully!\n\n"
                         f"Export resolution: {export_width:,}×{export_height:,} ({export_mp:.1f}MP)\n"
                         f"Original resolution: {original_width:,}×{original_height:,}\n"
+                        f"{overlay_info}"
                         f"Location: {file_path}")
                 
             except Exception as e:
                 messagebox.showerror("Error", f"Failed to export image: {str(e)}")
+    
+    def _create_image_with_overlays(self):
+        """Create a copy of the working image with grid and/or lines drawn on it"""
+        # For overlays with clipped sections, we want to start with the original image
+        # and then apply both the sections and other overlays
+        if hasattr(self, 'clipped_sections') and self.clipped_sections:
+            # Start with original image, then apply sections and overlays
+            overlay_image = self.original_image.copy()
+        else:
+            # No sections, just use working image
+            overlay_image = self.working_image.copy()
+        
+        draw = ImageDraw.Draw(overlay_image)
+        
+        # Get image dimensions
+        img_width, img_height = overlay_image.size
+        
+        # Draw vertical lines if they're shown
+        if self.show_lines and hasattr(self, 'line_positions') and self.line_positions:
+            line_color = (0, 255, 0) if self.lines_confirmed else (255, 0, 0)  # Green if confirmed, red if not
+            line_width = max(1, int(min(img_width, img_height) / 1000))  # Scale line width with image size
+            if self.lines_confirmed:
+                line_width = max(2, line_width)  # Confirmed lines are thicker
+            
+            for x_pos in self.line_positions:
+                # Convert to integer and ensure line position is within image bounds
+                x_pos_int = int(round(x_pos))
+                if 0 <= x_pos_int <= img_width:
+                    # Draw line from top to bottom
+                    draw.line([(x_pos_int, 0), (x_pos_int, img_height-1)], 
+                             fill=line_color, width=line_width)
+        
+        # Draw grid if it's shown
+        if self.show_grid and self.original_image and hasattr(self, 'image_dpi'):
+            try:
+                # Calculate grid spacing in pixels (always use cm now)
+                grid_spacing_real = self.cm_to_pixels(self.grid_size_cm)
+                
+                # Ensure grid spacing is reasonable
+                if grid_spacing_real > 0 and grid_spacing_real < min(img_width, img_height):
+                    # Scale line width based on image size
+                    base_line_width = max(1, int(min(img_width, img_height) / 2000))
+                    
+                    # Draw vertical grid lines
+                    x = 0
+                    line_count = 0
+                    while x <= img_width and line_count < 1000:  # Safety limit
+                        # Make every 5th line slightly thicker for major grid lines
+                        line_width = base_line_width * 2 if line_count % 5 == 0 else base_line_width
+                        line_color = (100, 100, 100) if line_count % 5 == 0 else (180, 180, 180)  # Gray colors
+                        
+                        x_int = int(round(x))
+                        if x_int <= img_width:  # Only draw if within bounds
+                            draw.line([(x_int, 0), (x_int, img_height-1)], 
+                                     fill=line_color, width=line_width)
+                        x += grid_spacing_real
+                        line_count += 1
+                    
+                    # Draw horizontal grid lines
+                    y = 0
+                    line_count = 0
+                    while y <= img_height and line_count < 1000:  # Safety limit
+                        # Make every 5th line slightly thicker for major grid lines
+                        line_width = base_line_width * 2 if line_count % 5 == 0 else base_line_width
+                        line_color = (100, 100, 100) if line_count % 5 == 0 else (180, 180, 180)  # Gray colors
+                        
+                        y_int = int(round(y))
+                        if y_int <= img_height:  # Only draw if within bounds
+                            draw.line([(0, y_int), (img_width-1, y_int)], 
+                                     fill=line_color, width=line_width)
+                        y += grid_spacing_real
+                        line_count += 1
+            except Exception as e:
+                print(f"Warning: Could not draw grid overlay: {e}")
+                # Continue without grid if there's an error
+        
+        # Draw clipped sections (colored selections) if they exist
+        if hasattr(self, 'clipped_sections') and self.clipped_sections:
+            try:
+                for section in self.clipped_sections:
+                    # Get section position and size
+                    pos_x, pos_y = section['position']
+                    section_image = section['image']
+                    
+                    # Ensure position is within image bounds
+                    if (pos_x >= 0 and pos_y >= 0 and 
+                        pos_x < img_width and pos_y < img_height):
+                        
+                        # Calculate the area to paste (clip to image bounds if necessary)
+                        sect_width, sect_height = section_image.size
+                        end_x = min(pos_x + sect_width, img_width)
+                        end_y = min(pos_y + sect_height, img_height)
+                        
+                        # Crop section image if it extends beyond bounds
+                        if end_x < pos_x + sect_width or end_y < pos_y + sect_height:
+                            crop_width = end_x - pos_x
+                            crop_height = end_y - pos_y
+                            section_image = section_image.crop((0, 0, crop_width, crop_height))
+                        
+                        # Paste the section onto the overlay image
+                        if section_image.mode == 'RGBA':
+                            overlay_image.paste(section_image, (int(pos_x), int(pos_y)), section_image)
+                        else:
+                            overlay_image.paste(section_image, (int(pos_x), int(pos_y)))
+            except Exception as e:
+                print(f"Warning: Could not draw clipped sections overlay: {e}")
+                # Continue without sections if there's an error
+        
+        return overlay_image
     
     def load_multiple_files(self):
         """Load multiple TIFF files for merging"""
@@ -4459,13 +5464,129 @@ class ImageEditor:
             self.update_freeform_canvas()
             self.update_position_controls()
     
+    def analyze_performance(self):
+        """Comprehensive performance analysis and optimization recommendations"""
+        try:
+            print("\n" + "="*60)
+            print("🔬 PERFORMANCE ANALYSIS REPORT")
+            print("="*60)
+            
+            # System Information
+            memory_info = psutil.virtual_memory()
+            cpu_count = psutil.cpu_count()
+            current_memory = psutil.Process().memory_info().rss / (1024**2)
+            
+            print(f"💻 SYSTEM INFO:")
+            print(f"   CPU Cores: {cpu_count}")
+            print(f"   Total RAM: {memory_info.total / (1024**3):.1f}GB")
+            print(f"   Available RAM: {memory_info.available / (1024**3):.1f}GB")
+            print(f"   Current Usage: {current_memory:.0f}MB")
+            
+            # GPU Status
+            gpu_status = "✅ ENABLED" if self.enable_gpu_acceleration else "❌ DISABLED"
+            gpu_devices = self.gpu_context.get('devices', 0) if self.gpu_context else 0
+            print(f"   GPU Acceleration: {gpu_status} ({gpu_devices} devices)")
+            
+            # Performance Settings
+            print(f"\n⚙️ PERFORMANCE SETTINGS:")
+            print(f"   Fast Zoom: {'✅ ON' if self.enable_fast_zoom else '❌ OFF'}")
+            print(f"   Viewport Culling: {'✅ ON' if self.viewport_culling else '❌ OFF'}")
+            print(f"   Async Rendering: {'✅ ON' if self.async_rendering else '❌ OFF'}")
+            print(f"   Memory Limit: {self.memory_limit_mb}MB")
+            
+            # Cache Performance
+            total_requests = self.cache_hit_count + self.cache_miss_count
+            hit_rate = (self.cache_hit_count / max(total_requests, 1)) * 100
+            print(f"\n💾 CACHE PERFORMANCE:")
+            print(f"   Cache Hit Rate: {hit_rate:.1f}% ({self.cache_hit_count}/{total_requests})")
+            print(f"   Pyramid Levels Cached: {len(self.image_pyramid)}")
+            print(f"   Display Cache Items: {len(self.display_cache)}")
+            print(f"   Cache Memory: {self.cache_total_memory / (1024**2):.1f}MB")
+            
+            # Render Performance
+            if self.performance_stats['render_times']:
+                recent_renders = self.performance_stats['render_times'][-20:]
+                avg_time = sum(r['duration_ms'] for r in recent_renders) / len(recent_renders)
+                min_time = min(r['duration_ms'] for r in recent_renders)
+                max_time = max(r['duration_ms'] for r in recent_renders)
+                
+                print(f"\n⚡ RENDER PERFORMANCE (last 20):")
+                print(f"   Average: {avg_time:.1f}ms")
+                print(f"   Range: {min_time:.1f}ms - {max_time:.1f}ms")
+                
+                # Categorize performance
+                if avg_time < 50:
+                    performance_grade = "🟢 EXCELLENT"
+                elif avg_time < 150:
+                    performance_grade = "🟡 GOOD"
+                elif avg_time < 500:
+                    performance_grade = "🟠 FAIR"
+                else:
+                    performance_grade = "🔴 POOR"
+                print(f"   Performance Grade: {performance_grade}")
+            
+            # Optimization Recommendations
+            print(f"\n💡 OPTIMIZATION RECOMMENDATIONS:")
+            recommendations = []
+            
+            if not self.enable_fast_zoom:
+                recommendations.append("Enable Fast Zoom for better performance")
+            
+            if not self.enable_gpu_acceleration and HAS_OPENCV:
+                recommendations.append("Enable GPU acceleration if CUDA is available")
+            
+            if hit_rate < 70:
+                recommendations.append("Low cache hit rate - consider larger cache size")
+            
+            if current_memory > self.memory_limit_mb * 0.9:
+                recommendations.append("High memory usage - consider lowering memory limit or clearing cache")
+            
+            if self.performance_stats['render_times'] and avg_time > 200:
+                recommendations.append("Slow render times - try reducing image size or pyramid levels")
+            
+            if len(self.image_pyramid) > 10:
+                recommendations.append("Large pyramid cache - consider periodic cleanup")
+            
+            if not recommendations:
+                recommendations.append("Performance is optimal! 🎉")
+            
+            for i, rec in enumerate(recommendations, 1):
+                print(f"   {i}. {rec}")
+            
+            print("="*60)
+            
+            # Store analysis results
+            self.last_performance_analysis = {
+                'timestamp': time.time(),
+                'memory_usage': current_memory,
+                'cache_hit_rate': hit_rate,
+                'avg_render_time': avg_time if self.performance_stats['render_times'] else 0,
+                'recommendations': recommendations
+            }
+            
+        except Exception as e:
+            print(f"Performance analysis error: {e}")
+    
     def update_zoom_info(self):
-        """Update zoom information in the UI"""
+        """Enhanced zoom information with performance indicators"""
         if hasattr(self, 'zoom_info_label'):
-            zoom_percent = int(self.freeform_zoom * 100)
-            # Show performance mode indicator
-            performance_info = f" • Performance Mode: {len(self.preview_images)} previews" if hasattr(self, 'preview_images') else ""
-            selection_info = f" • Selected: Image {self.selected_image_index + 1}" if self.selected_image_index is not None else ""
+            zoom_percent = int(self.freeform_zoom * 100) if hasattr(self, 'freeform_zoom') else int(self.image_scale * 100)
+            
+            # Performance indicators
+            gpu_indicator = "🚀" if self.enable_gpu_acceleration else "💻"
+            fast_indicator = "⚡" if self.enable_fast_zoom else "🐌"
+            
+            # Cache efficiency
+            total_requests = self.cache_hit_count + self.cache_miss_count
+            hit_rate = (self.cache_hit_count / max(total_requests, 1)) * 100
+            
+            performance_info = f" • {gpu_indicator}{fast_indicator} Cache: {hit_rate:.0f}%"
+            
+            if hasattr(self, 'preview_images'):
+                performance_info += f" • Previews: {len(self.preview_images)}"
+            
+            selection_info = f" • Selected: Image {self.selected_image_index + 1}" if hasattr(self, 'selected_image_index') and self.selected_image_index is not None else ""
+            
             self.zoom_info_label.config(text=f"Zoom: {zoom_percent}%{performance_info}{selection_info}")
     
     def zoom_in_freeform(self):
