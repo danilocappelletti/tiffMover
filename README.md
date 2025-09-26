@@ -54,6 +54,17 @@ A comprehensive Python application for editing gigapixel TIFF images with profes
 - **Real-time Status Feedback**: Live coordinate display and operation status
 - **Visual Selection Indicators**: Orange borders for selected images in multi-image mode
 
+### 📥 **Smart Export with Overlays (NEW!)**
+- **Overlay Detection**: Automatically detects when you have active overlays (grid, guide lines, colored selections)
+- **Export Choice Dialog**: Choose to export WITH or WITHOUT overlays for each save
+- **Full Resolution Overlays**: All overlays rendered at full image resolution
+- **Multiple Overlay Types**: 
+  - Grid lines with measurements
+  - Vertical guide lines (red/green based on confirmation status)
+  - Colored selection areas
+- **Format Support**: Export overlays to TIFF, PNG, or JPEG formats
+- **Documentation Ready**: Perfect for creating annotated images for reports and documentation
+
 ## 🚀 **Quick Start**
 
 ### Prerequisites

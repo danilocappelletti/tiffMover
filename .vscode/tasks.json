@@ -11,6 +11,34 @@
 			"group": "build",
 			"isBackground": false,
 			"problemMatcher": []
+		},
+		{
+			"label": "Run IIIF Image Editor",
+			"type": "shell",
+			"command": "C:/Users/danil/Documents/PersonalWorks/mover/.venv/Scripts/python.exe",
+			"args": [
+				"iiif_image_editor.py"
+			],
+			"isBackground": false,
+			"group": "build"
+		},
+		{
+			"label": "Run Enhanced IIIF Editor",
+			"type": "shell",
+			"command": "C:/Users/danil/Documents/PersonalWorks/mover/.venv/Scripts/python.exe",
+			"args": [
+				"enhanced_iiif_editor.py"
+			],
+			"isBackground": false,
+			"group": "build"
+		},
+		{
+			"label": "Run Enhanced TIFF Editor",
+			"type": "shell",
+			"command": "C:/Users/danil/Documents/PersonalWorks/mover/.venv/Scripts/python.exe enhanced_iiif_editor.py",
+			"args": [],
+			"isBackground": false,
+			"group": "build"
 		}
 	]
 }

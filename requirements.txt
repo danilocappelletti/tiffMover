@@ -1,6 +1,7 @@
 # TIFF Image Editor - Python Dependencies
-# Core image processing
+# Core image processing and GUI
 Pillow>=9.0.0
+psutil>=5.9.0
 
 # Build tools
 pyinstaller>=5.0.0
@@ -12,6 +13,9 @@ pyinstaller>=5.0.0
 # - json
 # - os  
 # - time
+# - hashlib
+# - warnings
+# - gc
 
-# Note: tkinter, json, os, and time are part of Python's standard library
+# Note: tkinter and other standard library modules are included with Python
 # and don't need to be installed separately
