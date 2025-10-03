@@ -1772,14 +1772,17 @@ class ImageEditor:
         self.enable_fast_zoom = not self.enable_fast_zoom
         mode = "OPTIMIZED 🚀" if self.enable_fast_zoom else "LEGACY 🐌"
         self.update_status(f"Zoom mode: {mode}")
+        # Update checkbox to match internal state if it exists
+        if hasattr(self, 'fast_zoom_var'):
+            self.fast_zoom_var.set(self.enable_fast_zoom)
         self.display_image()  # Refresh with new mode
     
     def toggle_fast_zoom_ui(self):
         """Toggle fast zoom from UI checkbox"""
         self.enable_fast_zoom = self.fast_zoom_var.get()
-        self.toggle_fast_zoom()
-        # Update checkbox to match internal state
-        self.fast_zoom_var.set(self.enable_fast_zoom)
+        mode = "OPTIMIZED 🚀" if self.enable_fast_zoom else "LEGACY 🐌"
+        self.update_status(f"Zoom mode: {mode}")
+        self.display_image()  # Refresh with new mode
     
     def toggle_gpu_acceleration(self):
         """Toggle GPU acceleration on/off"""
