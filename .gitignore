@@ -54,3 +54,13 @@ Thumbs.db
 *.app
 *.dmg
 *.pkg
+
+# PyInstaller build directories
+TIFF_Image_Editor_windows/
+TIFF_Image_Editor_macos/
+TIFF_Image_Editor_macos_combined/
+TIFF_Image_Editor_linux/
+*_windows/
+*_macos/
+*_macos_combined/
+*_linux/
