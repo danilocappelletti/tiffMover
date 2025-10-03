@@ -52,6 +52,7 @@ import hashlib
 from dataclasses import dataclass
 from typing import Optional, Tuple, Dict, List
 import numpy as np
+import platform
 
 # Check for GPU acceleration libraries
 try:
@@ -77,6 +78,24 @@ class ImageEditor:
         self.root.title("📸 Advanced TIFF Image Editor - No Size Limits")
         self.root.geometry("1600x1000")
         self.root.configure(bg='#f0f0f0')
+        
+        # Detect platform for UI adjustments
+        self.is_macos = platform.system() == 'Darwin'
+        self.is_windows = platform.system() == 'Windows'
+        self.is_linux = platform.system() == 'Linux'
+        
+        # Platform-specific UI adjustments
+        if self.is_macos:
+            # macOS uses smaller default fonts and different padding
+            self.ui_scale = 0.9
+            self.font_size_base = 11
+            self.font_size_header = 13
+            self.padding_scale = 0.8
+        else:
+            self.ui_scale = 1.0
+            self.font_size_base = 9
+            self.font_size_header = 12
+            self.padding_scale = 1.0
         
         # Define color scheme for modern UI
         self.colors = {
@@ -246,16 +265,37 @@ class ImageEditor:
     def setup_styles(self):
         """Setup custom ttk styles for modern UI"""
         style = ttk.Style()
-        style.theme_use('clam')
+        # Use aqua theme on macOS for native look, clam on other platforms
+        if self.is_macos:
+            try:
+                style.theme_use('aqua')
+            except:
+                style.theme_use('clam')
+        else:
+            style.theme_use('clam')
+        
+        # Platform-specific font
+        if self.is_macos:
+            ui_font = ('SF Pro', int(10 * self.ui_scale), 'bold')
+            ui_font_normal = ('SF Pro', int(9 * self.ui_scale))
+        elif self.is_windows:
+            ui_font = ('Segoe UI', 10, 'bold')
+            ui_font_normal = ('Segoe UI', 9)
+        else:
+            ui_font = ('Ubuntu', 10, 'bold')
+            ui_font_normal = ('Ubuntu', 9)
         
         # Configure modern button styles
+        padding_h = int(15 * self.padding_scale)
+        padding_v = int(10 * self.padding_scale)
+        
         style.configure('Modern.TButton',
                        background=self.colors['primary'],
                        foreground='white',
                        borderwidth=0,
                        focuscolor='none',
-                       padding=(15, 10),
-                       font=('Segoe UI', 10, 'bold'))
+                       padding=(padding_h, padding_v),
+                       font=ui_font)
         
         style.map('Modern.TButton',
                  background=[('active', self.colors['hover']),
@@ -1185,10 +1225,19 @@ class ImageEditor:
         
     def load_image(self):
         """Load a TIFF image with no size restrictions"""
-        file_path = filedialog.askopenfilename(
-            title="Select TIFF Image",
-            filetypes=[("TIFF files", "*.tiff *.tif"), ("All files", "*.*")]
-        )
+        # macOS fix: add parent parameter and handle file type differently
+        if self.is_macos:
+            # macOS file dialog needs explicit parent and different filetypes format
+            file_path = filedialog.askopenfilename(
+                parent=self.root,
+                title="Select TIFF Image",
+                filetypes=[("TIFF files", "*.tiff *.tif *.TIF *.TIFF"), ("All files", "*")]
+            )
+        else:
+            file_path = filedialog.askopenfilename(
+                title="Select TIFF Image",
+                filetypes=[("TIFF files", "*.tiff *.tif"), ("All files", "*.*")]
+            )
         
         if file_path:
             try:
@@ -3762,11 +3811,19 @@ class ImageEditor:
             messagebox.showwarning("Warning", "No clipped sections to save")
             return
             
-        file_path = filedialog.asksaveasfilename(
-            title="Save Project",
-            defaultextension=".json",
-            filetypes=[("JSON files", "*.json"), ("All files", "*.*")]
-        )
+        if self.is_macos:
+            file_path = filedialog.asksaveasfilename(
+                parent=self.root,
+                title="Save Project",
+                defaultextension=".json",
+                filetypes=[("JSON files", "*.json"), ("All files", "*")]
+            )
+        else:
+            file_path = filedialog.asksaveasfilename(
+                title="Save Project",
+                defaultextension=".json",
+                filetypes=[("JSON files", "*.json"), ("All files", "*.*")]
+            )
         
         if file_path:
             try:
@@ -3796,10 +3853,17 @@ class ImageEditor:
                 
     def load_project(self):
         """Load project from JSON file"""
-        file_path = filedialog.askopenfilename(
-            title="Load Project",
-            filetypes=[("JSON files", "*.json"), ("All files", "*.*")]
-        )
+        if self.is_macos:
+            file_path = filedialog.askopenfilename(
+                parent=self.root,
+                title="Load Project",
+                filetypes=[("JSON files", "*.json"), ("All files", "*")]
+            )
+        else:
+            file_path = filedialog.askopenfilename(
+                title="Load Project",
+                filetypes=[("JSON files", "*.json"), ("All files", "*.*")]
+            )
         
         if file_path:
             try:
@@ -3855,12 +3919,21 @@ class ImageEditor:
                 return
             include_overlays = result
             
-        file_path = filedialog.asksaveasfilename(
-            title="Export Image",
-            defaultextension=".tiff",
-            filetypes=[("TIFF files", "*.tiff"), ("PNG files", "*.png"), 
-                      ("JPEG files", "*.jpg"), ("All files", "*.*")]
-        )
+        if self.is_macos:
+            file_path = filedialog.asksaveasfilename(
+                parent=self.root,
+                title="Export Image",
+                defaultextension=".tiff",
+                filetypes=[("TIFF files", "*.tiff *.tif"), ("PNG files", "*.png"), 
+                          ("JPEG files", "*.jpg *.jpeg"), ("All files", "*")]
+            )
+        else:
+            file_path = filedialog.asksaveasfilename(
+                title="Export Image",
+                defaultextension=".tiff",
+                filetypes=[("TIFF files", "*.tiff"), ("PNG files", "*.png"), 
+                          ("JPEG files", "*.jpg"), ("All files", "*.*")]
+            )
         
         if file_path:
             try:
@@ -4018,10 +4091,18 @@ class ImageEditor:
     
     def load_multiple_files(self):
         """Load multiple TIFF files for merging"""
-        file_paths = filedialog.askopenfilenames(
-            title="Select Multiple TIFF Images to Merge",
-            filetypes=[("TIFF files", "*.tiff *.tif"), ("All files", "*.*")]
-        )
+        # macOS fix: add parent parameter
+        if self.is_macos:
+            file_paths = filedialog.askopenfilenames(
+                parent=self.root,
+                title="Select Multiple TIFF Images to Merge",
+                filetypes=[("TIFF files", "*.tiff *.tif *.TIF *.TIFF"), ("All files", "*")]
+            )
+        else:
+            file_paths = filedialog.askopenfilenames(
+                title="Select Multiple TIFF Images to Merge",
+                filetypes=[("TIFF files", "*.tiff *.tif"), ("All files", "*.*")]
+            )
         
         if file_paths:
             self.loaded_files = list(file_paths)
@@ -4291,10 +4372,17 @@ class ImageEditor:
     
     def add_more_files(self):
         """Add more files to the merge list"""
-        file_paths = filedialog.askopenfilenames(
-            title="Select Additional TIFF Images",
-            filetypes=[("TIFF files", "*.tiff *.tif"), ("All files", "*.*")]
-        )
+        if self.is_macos:
+            file_paths = filedialog.askopenfilenames(
+                parent=self.root if hasattr(self, 'root') else self.merge_preview_window,
+                title="Select Additional TIFF Images",
+                filetypes=[("TIFF files", "*.tiff *.tif *.TIF *.TIFF"), ("All files", "*")]
+            )
+        else:
+            file_paths = filedialog.askopenfilenames(
+                title="Select Additional TIFF Images",
+                filetypes=[("TIFF files", "*.tiff *.tif"), ("All files", "*.*")]
+            )
         
         if file_paths:
             try:
@@ -5629,13 +5717,23 @@ class ImageEditor:
             file_count = len(self.loaded_files) if self.loaded_files else 1
         suggested_name = f"merged_image_{file_count}_files.tiff"
         
-        file_path = filedialog.asksaveasfilename(
-            title="Save Merged Image",
-            initialfile=suggested_name,
-            defaultextension=".tiff",
-            filetypes=[("TIFF files", "*.tiff"), ("PNG files", "*.png"), 
-                      ("JPEG files", "*.jpg"), ("All files", "*.*")]
-        )
+        if self.is_macos:
+            file_path = filedialog.asksaveasfilename(
+                parent=self.root,
+                title="Save Merged Image",
+                initialfile=suggested_name,
+                defaultextension=".tiff",
+                filetypes=[("TIFF files", "*.tiff *.tif"), ("PNG files", "*.png"), 
+                          ("JPEG files", "*.jpg *.jpeg"), ("All files", "*")]
+            )
+        else:
+            file_path = filedialog.asksaveasfilename(
+                title="Save Merged Image",
+                initialfile=suggested_name,
+                defaultextension=".tiff",
+                filetypes=[("TIFF files", "*.tiff"), ("PNG files", "*.png"), 
+                          ("JPEG files", "*.jpg"), ("All files", "*.*")]
+            )
         
         if file_path:
             try:
