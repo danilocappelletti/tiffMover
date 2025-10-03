@@ -1,6 +1,7 @@
 # TIFF Image Editor - Python Dependencies
 # Core image processing and GUI
 Pillow>=9.0.0
+numpy>=1.21.0
 psutil>=5.9.0
 
 # Build tools
