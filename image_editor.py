@@ -262,6 +262,23 @@ class ImageEditor:
         
         self.setup_ui()
         
+    def create_button(self, parent, text, command, bg_color, fg_color='white', **kwargs):
+        """Create a button with proper macOS styling"""
+        if self.is_macos:
+            # On macOS, use highlightbackground and configure activebackground for better visibility
+            btn = tk.Button(parent, text=text, command=command,
+                          fg=fg_color,
+                          highlightbackground=bg_color,
+                          activebackground=bg_color,
+                          activeforeground=fg_color,
+                          **kwargs)
+        else:
+            # On other platforms, use bg normally
+            btn = tk.Button(parent, text=text, command=command,
+                          bg=bg_color, fg=fg_color,
+                          **kwargs)
+        return btn
+    
     def setup_styles(self):
         """Setup custom ttk styles for modern UI"""
         style = ttk.Style()
@@ -456,40 +473,40 @@ class ImageEditor:
         button_frame.pack(pady=10, padx=10)
         
         # File operations
-        tk.Button(button_frame, text="Load TIFF", command=self.load_image,
-                 bg='#4CAF50', fg='white', font=('Arial', 9), 
+        self.create_button(button_frame, text="Load TIFF", command=self.load_image,
+                 bg_color='#4CAF50', font=('Arial', 9), 
                  padx=10, pady=5).pack(side=tk.LEFT, padx=2)
                  
-        tk.Button(button_frame, text="📁 Multi-File", command=self.load_multiple_files,
-                 bg='#9C27B0', fg='white', font=('Arial', 9), 
+        self.create_button(button_frame, text="📁 Multi-File", command=self.load_multiple_files,
+                 bg_color='#9C27B0', font=('Arial', 9), 
                  padx=10, pady=5).pack(side=tk.LEFT, padx=2)
                  
-        tk.Button(button_frame, text="Save Project", command=self.save_project,
-                 bg='#2196F3', fg='white', font=('Arial', 9), 
+        self.create_button(button_frame, text="Save Project", command=self.save_project,
+                 bg_color='#2196F3', font=('Arial', 9), 
                  padx=10, pady=5).pack(side=tk.LEFT, padx=2)
                  
-        tk.Button(button_frame, text="Load Project", command=self.load_project,
-                 bg='#2196F3', fg='white', font=('Arial', 9), 
+        self.create_button(button_frame, text="Load Project", command=self.load_project,
+                 bg_color='#2196F3', font=('Arial', 9), 
                  padx=10, pady=5).pack(side=tk.LEFT, padx=2)
                  
-        tk.Button(button_frame, text="Export Image", command=self.export_image,
-                 bg='#FF9800', fg='white', font=('Arial', 9), 
+        self.create_button(button_frame, text="Export Image", command=self.export_image,
+                 bg_color='#FF9800', font=('Arial', 9), 
                  padx=10, pady=5).pack(side=tk.LEFT, padx=2)
         
         # Separator
         tk.Frame(button_frame, bg='#ddd', width=2, height=30).pack(side=tk.LEFT, padx=10)
         
         # View controls
-        tk.Button(button_frame, text="Zoom In", command=self.zoom_in,
-                 bg='#607D8B', fg='white', font=('Arial', 9), 
+        self.create_button(button_frame, text="Zoom In", command=self.zoom_in,
+                 bg_color='#607D8B', font=('Arial', 9), 
                  padx=10, pady=5).pack(side=tk.LEFT, padx=2)
                  
-        tk.Button(button_frame, text="Zoom Out", command=self.zoom_out,
-                 bg='#607D8B', fg='white', font=('Arial', 9), 
+        self.create_button(button_frame, text="Zoom Out", command=self.zoom_out,
+                 bg_color='#607D8B', font=('Arial', 9), 
                  padx=10, pady=5).pack(side=tk.LEFT, padx=2)
                  
-        tk.Button(button_frame, text="Fit Window", command=self.fit_to_window,
-                 bg='#607D8B', fg='white', font=('Arial', 9), 
+        self.create_button(button_frame, text="Fit Window", command=self.fit_to_window,
+                 bg_color='#607D8B', font=('Arial', 9), 
                  padx=10, pady=5).pack(side=tk.LEFT, padx=2)
         
         # Another separator
@@ -499,16 +516,16 @@ class ImageEditor:
         perf_frame = tk.Frame(button_frame, bg='#f5f5f5')
         perf_frame.pack(side=tk.LEFT, padx=5)
         
-        tk.Button(perf_frame, text="🚀 Fast Zoom", command=self.toggle_fast_zoom,
-                 bg='#4CAF50', fg='white', font=('Arial', 9), 
+        self.create_button(perf_frame, text="🚀 Fast Zoom", command=self.toggle_fast_zoom,
+                 bg_color='#4CAF50', font=('Arial', 9), 
                  padx=8, pady=5).pack(side=tk.LEFT, padx=2)
                  
-        tk.Button(perf_frame, text="🗑️ Clear Cache", command=self.clear_image_cache,
-                 bg='#FF9800', fg='white', font=('Arial', 9), 
+        self.create_button(perf_frame, text="🗑️ Clear Cache", command=self.clear_image_cache,
+                 bg_color='#FF9800', font=('Arial', 9), 
                  padx=8, pady=5).pack(side=tk.LEFT, padx=2)
         
-        tk.Button(perf_frame, text="🔬 Analyze", command=self.analyze_performance,
-                 bg='#2196F3', fg='white', font=('Arial', 9), 
+        self.create_button(perf_frame, text="🔬 Analyze", command=self.analyze_performance,
+                 bg_color='#2196F3', font=('Arial', 9), 
                  padx=8, pady=5).pack(side=tk.LEFT, padx=2)
         
         # GPU indicator (if available)
@@ -651,9 +668,18 @@ class ImageEditor:
         tk.Label(color_frame, text="Selection Color:", font=('Arial', 9, 'bold'),
                 bg='#f0f0f0', fg='#333').pack(anchor=tk.W, pady=(0, 5))
         
-        self.color_button = tk.Button(color_frame, bg=self.selected_color, 
-                                     text="Choose Color", width=20, height=2,
-                                     command=self.choose_color, relief='raised', bd=2)
+        # Color button with platform-specific handling
+        if self.is_macos:
+            self.color_button = tk.Button(color_frame,
+                                         text="Choose Color", width=20, height=2,
+                                         command=self.choose_color, relief='raised', bd=2,
+                                         highlightbackground=self.selected_color,
+                                         fg='white')
+        else:
+            self.color_button = tk.Button(color_frame, bg=self.selected_color, 
+                                         text="Choose Color", width=20, height=2,
+                                         command=self.choose_color, relief='raised', bd=2,
+                                         fg='white')
         self.color_button.pack(fill=tk.X)
         
         # === PRECISION MOVEMENT SECTION ===
@@ -814,25 +840,26 @@ class ImageEditor:
         
         presets = [("Tight", "1.0"), ("Normal", "3.0"), ("Wide", "5.0"), ("Very Wide", "10.0")]
         for text, value in presets:
-            btn = tk.Button(preset_buttons_frame, text=text, 
+            btn = self.create_button(preset_buttons_frame, text=text, 
                            command=lambda v=value: self.set_spacing_preset(v),
+                           bg_color='#e0e0e0', fg_color='black',
                            font=('Arial', 7), padx=5, pady=1,
-                           bg='#e0e0e0', relief='raised', bd=1)
+                           relief='raised', bd=1)
             btn.pack(side=tk.LEFT, padx=(0, 2))
         
         # Lines control buttons with better styling
         lines_buttons_frame = tk.Frame(lines_section, bg='#f0f0f0')
         lines_buttons_frame.pack(fill=tk.X, pady=(10, 0))
         
-        self.confirm_lines_button = tk.Button(lines_buttons_frame, text="✅ Confirm Lines", 
+        self.confirm_lines_button = self.create_button(lines_buttons_frame, text="✅ Confirm Lines", 
                                              command=self.confirm_lines,
-                                             bg='#4CAF50', fg='white', font=('Arial', 9, 'bold'),
+                                             bg_color='#4CAF50', font=('Arial', 9, 'bold'),
                                              padx=8, pady=3, relief='raised')
         self.confirm_lines_button.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 2))
         
-        self.unlock_lines_button = tk.Button(lines_buttons_frame, text="🔓 Unlock", 
+        self.unlock_lines_button = self.create_button(lines_buttons_frame, text="🔓 Unlock", 
                                             command=self.unlock_lines,
-                                            bg='#FF9800', fg='white', font=('Arial', 9, 'bold'),
+                                            bg_color='#FF9800', font=('Arial', 9, 'bold'),
                                             padx=8, pady=3, state='disabled', relief='raised')
         self.unlock_lines_button.pack(side=tk.RIGHT, fill=tk.X, expand=True, padx=(2, 0))
         
@@ -840,12 +867,12 @@ class ImageEditor:
         lines_extra_frame = tk.Frame(lines_section, bg='#f0f0f0')
         lines_extra_frame.pack(fill=tk.X, pady=(5, 0))
         
-        tk.Button(lines_extra_frame, text="↻ Reset Positions", command=self.reset_line_positions,
-                 bg='#607D8B', fg='white', font=('Arial', 8, 'bold'),
+        self.create_button(lines_extra_frame, text="↻ Reset Positions", command=self.reset_line_positions,
+                 bg_color='#607D8B', font=('Arial', 8, 'bold'),
                  padx=5, pady=2, relief='raised').pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 2))
         
-        tk.Button(lines_extra_frame, text="📐 Equal Spacing", command=self.reset_equal_spacing,
-                 bg='#795548', fg='white', font=('Arial', 8, 'bold'),
+        self.create_button(lines_extra_frame, text="📐 Equal Spacing", command=self.reset_equal_spacing,
+                 bg_color='#795548', font=('Arial', 8, 'bold'),
                  padx=5, pady=2, relief='raised').pack(side=tk.RIGHT, fill=tk.X, expand=True, padx=(2, 0))
         
         # Instructions for line dragging
@@ -903,12 +930,12 @@ class ImageEditor:
         resize_buttons_frame = tk.Frame(size_section, bg='#f0f0f0')
         resize_buttons_frame.pack(fill=tk.X)
         
-        tk.Button(resize_buttons_frame, text="📐 Fit Lines", command=self.fit_image_to_lines,
-                 bg='#2196F3', fg='white', font=('Arial', 8, 'bold'),
+        self.create_button(resize_buttons_frame, text="📐 Fit Lines", command=self.fit_image_to_lines,
+                 bg_color='#2196F3', font=('Arial', 8, 'bold'),
                  padx=5, pady=2, relief='raised').pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 2))
         
-        tk.Button(resize_buttons_frame, text="🔄 Reset Size", command=self.reset_image_size,
-                 bg='#607D8B', fg='white', font=('Arial', 8, 'bold'),
+        self.create_button(resize_buttons_frame, text="🔄 Reset Size", command=self.reset_image_size,
+                 bg_color='#607D8B', font=('Arial', 8, 'bold'),
                  padx=5, pady=2, relief='raised').pack(side=tk.RIGHT, fill=tk.X, expand=True, padx=(2, 0))
         
         # === ACTION BUTTONS SECTION ===
@@ -918,16 +945,16 @@ class ImageEditor:
         actions_section.pack(fill=tk.X, pady=(0, 15))
         
         # Action buttons with better styling
-        tk.Button(actions_section, text="🗑️ Clear All Selections", command=self.clear_selections,
-                 bg='#f44336', fg='white', font=('Arial', 9, 'bold'),
+        self.create_button(actions_section, text="🗑️ Clear All Selections", command=self.clear_selections,
+                 bg_color='#f44336', font=('Arial', 9, 'bold'),
                  padx=10, pady=5, relief='raised').pack(fill=tk.X, pady=(0, 5))
         
-        tk.Button(actions_section, text="↶ Undo Last Selection", command=self.undo_last_selection,
-                 bg='#FF9800', fg='white', font=('Arial', 9, 'bold'),
+        self.create_button(actions_section, text="↶ Undo Last Selection", command=self.undo_last_selection,
+                 bg_color='#FF9800', font=('Arial', 9, 'bold'),
                  padx=10, pady=5, relief='raised').pack(fill=tk.X, pady=(0, 5))
         
-        tk.Button(actions_section, text="🔄 Reset Image", command=self.reset_image,
-                 bg='#607D8B', fg='white', font=('Arial', 9, 'bold'),
+        self.create_button(actions_section, text="🔄 Reset Image", command=self.reset_image,
+                 bg_color='#607D8B', font=('Arial', 9, 'bold'),
                  padx=10, pady=5, relief='raised').pack(fill=tk.X)
         
         # === PERFORMANCE SECTION ===
@@ -962,12 +989,12 @@ class ImageEditor:
         perf_buttons_frame = tk.Frame(perf_section, bg='#f0f0f0')
         perf_buttons_frame.pack(fill=tk.X)
         
-        tk.Button(perf_buttons_frame, text="🗑️ Clear Cache", command=self.clear_image_cache,
-                 bg='#FF9800', fg='white', font=('Arial', 9, 'bold'),
+        self.create_button(perf_buttons_frame, text="🗑️ Clear Cache", command=self.clear_image_cache,
+                 bg_color='#FF9800', font=('Arial', 9, 'bold'),
                  padx=8, pady=3, relief='raised').pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 2))
         
-        tk.Button(perf_buttons_frame, text="📊 Update Stats", command=self.update_memory_display,
-                 bg='#2196F3', fg='white', font=('Arial', 9, 'bold'),
+        self.create_button(perf_buttons_frame, text="📊 Update Stats", command=self.update_memory_display,
+                 bg_color='#2196F3', font=('Arial', 9, 'bold'),
                  padx=8, pady=3, relief='raised').pack(side=tk.RIGHT, fill=tk.X, expand=True, padx=(2, 0))
         
         # === HELP SECTION ===
@@ -1140,8 +1167,8 @@ class ImageEditor:
         up_frame = tk.Frame(arrows_container, bg='#f0f0f0')
         up_frame.pack()
         
-        up_button = tk.Button(up_frame, text="▲", command=lambda: self.move_selected_section(0, -1),
-                             font=('Arial', 14, 'bold'), bg='#4CAF50', fg='white', 
+        up_button = self.create_button(up_frame, text="▲", command=lambda: self.move_selected_section(0, -1),
+                             font=('Arial', 14, 'bold'), bg_color='#4CAF50', 
                              width=3, height=1, relief='raised', bd=2)
         up_button.pack()
         
@@ -1149,8 +1176,8 @@ class ImageEditor:
         middle_frame = tk.Frame(arrows_container, bg='#f0f0f0')
         middle_frame.pack(pady=3)
         
-        left_button = tk.Button(middle_frame, text="◄", command=lambda: self.move_selected_section(-1, 0),
-                               font=('Arial', 14, 'bold'), bg='#4CAF50', fg='white',
+        left_button = self.create_button(middle_frame, text="◄", command=lambda: self.move_selected_section(-1, 0),
+                               font=('Arial', 14, 'bold'), bg_color='#4CAF50',
                                width=3, height=1, relief='raised', bd=2)
         left_button.pack(side=tk.LEFT)
         
@@ -1159,8 +1186,8 @@ class ImageEditor:
                              bg='#f0f0f0', fg='#666')
         center_info.pack(side=tk.LEFT, padx=8)
         
-        right_button = tk.Button(middle_frame, text="►", command=lambda: self.move_selected_section(1, 0),
-                                font=('Arial', 14, 'bold'), bg='#4CAF50', fg='white',
+        right_button = self.create_button(middle_frame, text="►", command=lambda: self.move_selected_section(1, 0),
+                                font=('Arial', 14, 'bold'), bg_color='#4CAF50',
                                 width=3, height=1, relief='raised', bd=2)
         right_button.pack(side=tk.LEFT)
         
@@ -1168,8 +1195,8 @@ class ImageEditor:
         down_frame = tk.Frame(arrows_container, bg='#f0f0f0')
         down_frame.pack()
         
-        down_button = tk.Button(down_frame, text="▼", command=lambda: self.move_selected_section(0, 1),
-                               font=('Arial', 14, 'bold'), bg='#4CAF50', fg='white',
+        down_button = self.create_button(down_frame, text="▼", command=lambda: self.move_selected_section(0, 1),
+                               font=('Arial', 14, 'bold'), bg_color='#4CAF50',
                                width=3, height=1, relief='raised', bd=2)
         down_button.pack()
         
@@ -1179,19 +1206,19 @@ class ImageEditor:
         hint_label.pack(pady=(8, 0))
         
         # Simple action buttons
-        tk.Button(content_frame, text="Change Color", 
+        self.create_button(content_frame, text="Change Color", 
                  command=self.change_section_color,
-                 bg='#4CAF50', fg='white', font=('Arial', 9),
+                 bg_color='#4CAF50', font=('Arial', 9),
                  width=25, pady=3).pack(pady=2)
         
-        tk.Button(content_frame, text="Delete Selected", 
+        self.create_button(content_frame, text="Delete Selected", 
                  command=self.delete_selected_section,
-                 bg='#f44336', fg='white', font=('Arial', 9),
+                 bg_color='#f44336', font=('Arial', 9),
                  width=25, pady=3).pack(pady=2)
         
-        tk.Button(content_frame, text="Delete All", 
+        self.create_button(content_frame, text="Delete All", 
                  command=self.delete_all_sections,
-                 bg='#f44336', fg='white', font=('Arial', 9),
+                 bg_color='#f44336', font=('Arial', 9),
                  width=25, pady=3).pack(pady=2)
         
         # Bind listbox selection
@@ -3646,7 +3673,11 @@ class ImageEditor:
         color = colorchooser.askcolor(color=self.selected_color)
         if color[1]:  # If a color was selected
             self.selected_color = color[1]
-            self.color_button.configure(bg=self.selected_color)
+            # Update button color with platform-specific handling
+            if self.is_macos:
+                self.color_button.configure(highlightbackground=self.selected_color)
+            else:
+                self.color_button.configure(bg=self.selected_color)
             
     def clear_selections(self):
         """Clear all clipped sections"""

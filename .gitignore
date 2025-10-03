@@ -64,3 +64,12 @@ TIFF_Image_Editor_linux/
 *_macos/
 *_macos_combined/
 *_linux/
+
+# Documentation files (development notes)
+MACOS_FIXES.md
+MACOS_UPDATE_SUMMARY.md
+MACOS_TROUBLESHOOTING.md
+MERGE_FIX_SUMMARY.md
+MACOS_BUTTON_FIX.md
+test_macos_compatibility.py
+image_editor_backup_merge_mess.py
