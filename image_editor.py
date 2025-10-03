@@ -265,15 +265,16 @@ class ImageEditor:
     def create_button(self, parent, text, command, bg_color, fg_color='white', **kwargs):
         """Create a button with proper macOS styling"""
         if self.is_macos:
-            # On macOS, use highlightbackground and configure activebackground for better visibility
+            # On macOS, buttons stay system default color, so use black text for visibility
+            # highlightbackground provides a colored border to indicate button purpose
             btn = tk.Button(parent, text=text, command=command,
-                          fg=fg_color,
+                          fg='black',  # Always black text on macOS for visibility
                           highlightbackground=bg_color,
                           activebackground=bg_color,
-                          activeforeground=fg_color,
+                          activeforeground='black',  # Black text when active too
                           **kwargs)
         else:
-            # On other platforms, use bg normally
+            # On other platforms, use bg normally with white text
             btn = tk.Button(parent, text=text, command=command,
                           bg=bg_color, fg=fg_color,
                           **kwargs)
@@ -674,7 +675,7 @@ class ImageEditor:
                                          text="Choose Color", width=20, height=2,
                                          command=self.choose_color, relief='raised', bd=2,
                                          highlightbackground=self.selected_color,
-                                         fg='white')
+                                         fg='black')  # Black text for visibility on macOS
         else:
             self.color_button = tk.Button(color_frame, bg=self.selected_color, 
                                          text="Choose Color", width=20, height=2,
